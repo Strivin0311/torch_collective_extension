@@ -6,6 +6,7 @@
 
 #include <torch/python.h>
 
+#include <torch/csrc/Stream.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Work.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
@@ -27,6 +28,43 @@ public:
         int size);
 
     ~ExtProcessGroupNCCL() override;
+
+    // get the nccl cuda stream
+    at::cuda::CUDAStream& getNCCLStream();
+
+    // get the torch nccl comm
+    /** NOTE: this api is valid but neither used nor binded for now,
+     * 
+     * since c10d::NCCLComm is a local symbol, the detailed debugging process is recorded as follows:
+     * when using the member functions defined in NCCLComm as below:
+     *      ncclComm_t ncclComm = torchNCCLComm->getNcclComm();
+     *      ncclUniqueId nccUID = torchNCCLComm->getNcclId();
+     * 
+     * I run into an issue: undefined reference to `c10d::NCCLComm::getNcclComm()' 
+     * later I've found out that all the member functions including`c10d::NCCLComm::getNcclComm()'
+     * are local symbols that only visible inside the shared library `libtorch_cuda.so`,
+     * 
+     * with my own command as below:
+     * nm /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_cuda.so > libtorch_cuda.log
+     * and the relevant output looks like:
+     *      0000000000c98a40 t _ZN4c10d8NCCLComm11getNcclCommEv
+     *      0000000000908e96 t _ZN4c10d8NCCLComm11getNcclCommEv.cold
+     * 
+     * thus we have no direct access to NCCLComm
+     */
+    std::shared_ptr<c10d::NCCLComm> getTorchNCCLComm();
+
+    // get the nccl comm ptr w.r.t the current device
+    /** NOTE: this API is only provided in the main branch of torch >= v-2.7.1
+     * which can be a side way to get the nccl comm (ptr) w/o through torch nccl comm
+    */
+    // int64_t getNCCLCommPtr();
+
+    int getDeviceID() const { return at::cuda::current_device(); }
+
+    at::Device getDevice() const { return at::Device(at::kCUDA, getDeviceID()); }
+
+    std::string getDeviceKey() const { return std::to_string(getDeviceID()); }
 
     // c10::intrusive_ptr<Work> broadcast(
     //     std::vector<at::Tensor>& data,

@@ -1,18 +1,13 @@
 #include "../include/ext_nccl_backend.hpp"
 
-// #include <torch/csrc/Exceptions.h>
-// #include <torch/csrc/distributed/c10d/python_comm_hook.h>
-// #include <torch/csrc/jit/python/pybind_utils.h>
-// #include <torch/csrc/utils/object_ptr.h>
-// #include <torch/csrc/utils/pybind.h>
-
-// #include <torch/custom_class.h>
-
 #ifndef USE_C10D_NCCL
 #define USE_C10D_NCCL
 #endif
 
 
+/** NOTE: copied from torch/csrc/distributed/c10d/init.cpp
+ * to pybind-define a gil-safe destructor for this module
+ */
 namespace {
 // Wrapper to ensure GIL is released before destructing ProcessGroupGloo
 // TODO: move this somewhere more generally useful
@@ -69,7 +64,8 @@ PYBIND11_DECLARE_HOLDER_TYPE(T, IntrusivePtrNoGilDestructor<T>, true)
 
 template <typename T>
 using intrusive_ptr_no_gil_destructor_class_ =
-    py::class_<T, IntrusivePtrNoGilDestructor<T>>;
+  py::class_<T, IntrusivePtrNoGilDestructor<T>>;
+
 
 namespace c10d {
 
@@ -116,6 +112,23 @@ ExtProcessGroupNCCL::ExtProcessGroupNCCL(
   int size) : ProcessGroupNCCL(store, rank, size) {}
 
 ExtProcessGroupNCCL::~ExtProcessGroupNCCL() = default;
+
+// get the nccl cuda stream
+at::cuda::CUDAStream& ExtProcessGroupNCCL::getNCCLStream() {
+  return ncclStreams_.at(getDeviceKey());
+}
+
+// get the torch nccl comm
+std::shared_ptr<c10d::NCCLComm> ExtProcessGroupNCCL::getTorchNCCLComm() {
+  return devNCCLCommMap_.at(getDeviceKey());
+}
+
+
+// get the nccl comm ptr
+// int64_t ExtProcessGroupNCCL::getNCCLCommPtr() {
+//     return c10d::ProcessGroupNCCL::getCommPtr();
+// }
+
 
 // // This is a dummy allgather that sets all output tensors to zero
 // // Modify the implementation to conduct real communication asynchronously
@@ -267,8 +280,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::init([](const c10::intrusive_ptr<::c10d::Store>& store,
                      int rank,
                      int size) {
-            // gil_scoped_release is not safe as a call_guard in init.
-            // https://github.com/pybind/pybind11/issues/5473
+            // copied from torch/csrc/distributed/c10d/init.cpp
+            // gil_scoped_release is not safe as a call_guard for constructor
+            // see: https://github.com/pybind/pybind11/issues/5473
             py::gil_scoped_release nogil;
             return c10::make_intrusive<ExtProcessGroupNCCL>(
                 store, rank, size);
@@ -276,7 +290,43 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("store"),
           py::arg("rank"),
           py::arg("size"),
-          "Create ExtProcessGroupNCCL instance");
+          "Constructor to create ExtProcessGroupNCCL instance"
+      )
+      .def_property_readonly(
+        "nccl_stream",
+        [](ExtProcessGroupNCCL& self) -> py::object {
+          /** NOTE: here we do some hacky thing to get the nccl cuda stream in python-end
+           * 
+           * We first list the limitations as follows:
+           *    1. at::cuda::CUDAStream` is not registered by pytorch in python-end,
+           *      and we need to unwrap it to c10::Stream
+           *    2. it is not c10::Stream, but THPStream, that is directly linked to torch.cuda.Stream,
+           *      thus we need to convert a c10::Stream to THPStream
+           *    3. although pytorch gives a `THPStream_Wrap` function in `torch/csrc/Stream.h`
+           *      as well as a pybind type_cast function in `torch/csrc/utils/pybind.h`,
+           *      THPStream_Wrap is a local symbol in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so
+           *      thus we cannot directly access it
+           * 
+           * As a result, we give up the following code:
+           *    c10::Stream c10_stream = self.getNCCLStream().unwrap();
+           *    return py::reinterpret_steal<py::object>(THPStream_Wrap(c10_stream));
+           * 
+           * Therefore, we directly access the torch.cuda.Stream module 
+           * and initialize a pybind object with the internal cuda stream ptr
+           */
+          auto cuda_stream = self.getNCCLStream();
+          auto torch = py::module::import("torch");
+          auto cuda_module = torch.attr("cuda");
+          auto stream_type = cuda_module.attr("Stream");
+          
+          return stream_type(
+              py::cast(cuda_stream.device_index()),
+              py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()))
+          );
+        },
+        R"(Return the NCCL cuda stream w.r.t the current device)"
+      )
+      ;
 }
 
 } // namespace c10d

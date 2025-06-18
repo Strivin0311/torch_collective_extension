@@ -9,10 +9,24 @@ export MASTER_PORT=23457
 
 export OMP_NUM_THREADS=1
 
-torchrun \
+export PYTHONPATH=$PYTHONPATH:$(pwd)
+
+
+CMD="torchrun \
     --standalone \
     --nnode 1 \
     --nproc_per_node=$WORLD_SIZE \
     --master_addr=$MASTER_ADDRESS \
     --master_port=$MASTER_PORT \
-    example.py > example.log 2>&1
+    example.py
+"
+
+# uncomment the following two lines if not profiling
+# $CMD > example.log 2>&1
+# exit
+
+nsys profile \
+    --force-overwrite true \
+    -o example.nsys-rep \
+    --capture-range=cudaProfilerApi \
+    $CMD > example.log 2>&1
