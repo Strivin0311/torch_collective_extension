@@ -1,8 +1,6 @@
-#include "dummy.hpp"
-#include <iostream>
+#include "../include/dummy_backend.hpp"
 
 namespace c10d {
-
 
 bool WorkDummy::isCompleted() {
   return true;
@@ -19,6 +17,7 @@ bool WorkDummy::wait(std::chrono::milliseconds /* unused */) {
 c10::intrusive_ptr<c10::ivalue::Future> WorkDummy::getFuture() {
   return future_;
 }
+
 
 // If necessary, pass store/rank/size to the ctor and exchange connection
 // information here

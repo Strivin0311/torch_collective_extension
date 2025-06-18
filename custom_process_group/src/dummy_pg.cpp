@@ -1,8 +1,7 @@
-#include "dummy.hpp"
+#include "../include/dummy_pg.hpp"
+
 
 namespace c10d {
-
-
 bool WorkDummy::isCompleted() {
   return true;
 }

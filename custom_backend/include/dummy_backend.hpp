@@ -12,7 +12,7 @@
 
 namespace c10d {
 
-class BackendDummy : public Backend {
+class TORCH_API BackendDummy : public Backend {
  public:
 
   BackendDummy(int rank, int size);
@@ -98,7 +98,7 @@ class BackendDummy : public Backend {
     py::object module = py::module::import("torch.distributed");
     py::object register_backend =
         module.attr("Backend").attr("register_backend");
-    register_backend("dummy", py::cpp_function(createBackendDummy));
+    register_backend("dummy_backend", py::cpp_function(createBackendDummy));
   }
 };
 

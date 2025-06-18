@@ -1,14 +1,11 @@
 import os
 
 import torch
-import dummy_collectives
-
 import torch.distributed as dist
 
-os.environ['MASTER_ADDR'] = 'localhost'
-os.environ['MASTER_PORT'] = '29500'
+import dummy_collectives_backend
 
-dist.init_process_group("cpu:gloo,cuda:dummy", rank=0, world_size=1)
+dist.init_process_group("cpu:gloo,cuda:dummy_backend")
 
 # this goes through gloo
 x = torch.ones(6)
@@ -24,4 +21,4 @@ if torch.cuda.is_available():
     try:
         dist.broadcast(y, 0)
     except RuntimeError:
-        print("got RuntimeError when calling broadcast")
+        print("got RuntimeError when calling broadcast since dummy backend does not support it")

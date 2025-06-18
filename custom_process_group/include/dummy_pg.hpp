@@ -98,7 +98,7 @@ class ProcessGroupDummy : public ProcessGroup {
     py::object module = py::module::import("torch.distributed");
     py::object register_backend =
         module.attr("Backend").attr("register_backend");
-    register_backend("dummy", py::cpp_function(createProcessGroupDummy));
+    register_backend("dummy_pg", py::cpp_function(createProcessGroupDummy));
   }
 };
 
