@@ -4,7 +4,9 @@ from setuptools import setup
 from torch.utils import cpp_extension
 
 sources = ["src/ext_nccl_backend.cpp"]
-include_dirs = [f"{os.path.dirname(os.path.abspath(__file__))}/include/"]
+include_dirs = [
+    f"{os.path.dirname(os.path.abspath(__file__))}/include/",
+]
 
 if torch.cuda.is_available():
     module = cpp_extension.CUDAExtension(

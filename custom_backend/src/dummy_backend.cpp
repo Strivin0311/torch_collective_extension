@@ -61,7 +61,7 @@ c10::intrusive_ptr<Work> BackendDummy::allreduce(
   auto future = c10::make_intrusive<c10::ivalue::Future>(
     c10::ListType::create(c10::TensorType::get()));
   future->markCompleted(c10::IValue(tensors));
-  return c10::make_intrusive<WorkDummy>(OpType::ALLGATHER, std::move(future));
+  return c10::make_intrusive<WorkDummy>(OpType::ALLREDUCE, std::move(future));
 }
 
 c10::intrusive_ptr<Work> BackendDummy::allreduce_coalesced(
