@@ -1,8 +1,75 @@
 #include "../include/ext_nccl_backend.hpp"
 
+// #include <torch/csrc/Exceptions.h>
+// #include <torch/csrc/distributed/c10d/python_comm_hook.h>
+// #include <torch/csrc/jit/python/pybind_utils.h>
+// #include <torch/csrc/utils/object_ptr.h>
+// #include <torch/csrc/utils/pybind.h>
+
+// #include <torch/custom_class.h>
+
 #ifndef USE_C10D_NCCL
 #define USE_C10D_NCCL
 #endif
+
+
+namespace {
+// Wrapper to ensure GIL is released before destructing ProcessGroupGloo
+// TODO: move this somewhere more generally useful
+template <typename T>
+class IntrusivePtrNoGilDestructor {
+  c10::intrusive_ptr<T> impl_{};
+
+ public:
+  IntrusivePtrNoGilDestructor() = default;
+  IntrusivePtrNoGilDestructor(const IntrusivePtrNoGilDestructor&) = default;
+  IntrusivePtrNoGilDestructor(IntrusivePtrNoGilDestructor&&) noexcept = default;
+  IntrusivePtrNoGilDestructor& operator=(const IntrusivePtrNoGilDestructor&) =
+      default;
+  IntrusivePtrNoGilDestructor& operator=(
+      IntrusivePtrNoGilDestructor&&) noexcept = default;
+  /* implicit */ IntrusivePtrNoGilDestructor(c10::intrusive_ptr<T> impl)
+      : impl_(std::move(impl)) {}
+  // This ctor is very important; see
+  // https://github.com/pybind/pybind11/issues/2957
+  explicit IntrusivePtrNoGilDestructor(T* impl)
+      // NOLINTNEXTLINE(bugprone-exception-escape)
+      : impl_(c10::intrusive_ptr<T>::unsafe_steal_from_new(impl)) {}
+  // NOLINTNEXTLINE(bugprone-exception-escape)
+  ~IntrusivePtrNoGilDestructor() {
+    if (impl_) {
+      if (PyGILState_Check()) {
+        pybind11::gil_scoped_release release;
+        impl_.reset();
+      } else {
+        impl_.reset();
+      }
+    }
+  }
+  T& operator*() const noexcept {
+    return *impl_;
+  }
+  T* operator->() const noexcept {
+    return impl_.get();
+  }
+  [[nodiscard]] T* get() const noexcept {
+    return impl_.get();
+  }
+  void reset() noexcept {
+    impl_.reset();
+  }
+  operator bool() const noexcept {
+    return impl_;
+  }
+};
+
+} // anonymous namespace
+
+PYBIND11_DECLARE_HOLDER_TYPE(T, IntrusivePtrNoGilDestructor<T>, true)
+
+template <typename T>
+using intrusive_ptr_no_gil_destructor_class_ =
+    py::class_<T, IntrusivePtrNoGilDestructor<T>>;
 
 namespace c10d {
 
@@ -180,8 +247,36 @@ c10::intrusive_ptr<Backend> ExtProcessGroupNCCL::createExtProcessGroupNCCL(
   return c10::make_intrusive<ExtProcessGroupNCCL>(store, rank, size);
 }
 
+/** NOTE: `TORCH_EXTENSION_NAME` is an env var
+ * that will be automatically translated to the extention module name defined in setup.py
+ * e.g. since this module is named `ext_nccl_backend`
+ * thus in the python script, we can use this function (though no use for now) as follows:
+ * import ext_nccl_backend; print(ext_nccl_backend.createExtProcessGroupNCCL)
+ */
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("createExtProcessGroupNCCL", &ExtProcessGroupNCCL::createExtProcessGroupNCCL);
+
+  auto torch_c10d = py::module::import("torch._C._distributed_c10d");
+  auto processGroupNCCL = torch_c10d.attr("ProcessGroupNCCL"); // inherit from ProcessGroupNCCL
+  auto module = py::handle(m).cast<py::module>();
+
+  auto extProcessGroupNCCL = 
+      intrusive_ptr_no_gil_destructor_class_<ExtProcessGroupNCCL>(
+          module, "ExtProcessGroupNCCL", processGroupNCCL)
+      .def(
+          py::init([](const c10::intrusive_ptr<::c10d::Store>& store,
+                     int rank,
+                     int size) {
+            // gil_scoped_release is not safe as a call_guard in init.
+            // https://github.com/pybind/pybind11/issues/5473
+            py::gil_scoped_release nogil;
+            return c10::make_intrusive<ExtProcessGroupNCCL>(
+                store, rank, size);
+          }),
+          py::arg("store"),
+          py::arg("rank"),
+          py::arg("size"),
+          "Create ExtProcessGroupNCCL instance");
 }
 
 } // namespace c10d

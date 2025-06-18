@@ -25,5 +25,7 @@ setup(
     name="ext_nccl_backend",
     version="0.0.1",
     ext_modules=[module],
-    cmdclass={'build_ext': cpp_extension.BuildExtension}
+    cmdclass={'build_ext': cpp_extension.BuildExtension},
+    package_data={'': ['*.pyi']},
+    include_package_data=True,
 )
