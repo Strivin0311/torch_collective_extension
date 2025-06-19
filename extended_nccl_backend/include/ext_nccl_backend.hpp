@@ -13,6 +13,7 @@
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Utils.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
+#include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
 
 /** NOTE: in this header file, pytorch defines a lot of type_caster 
  * to let pybind automatically convert between c++ and python types,
@@ -79,11 +80,30 @@ public:
         at::Tensor& inputbuffer,
         const AllgatherOptions& opts = AllgatherOptions()) override;
 
+    c10::intrusive_ptr<Work> alltoall_base(
+        at::Tensor& outputTensor,
+        at::Tensor& inputTensor,
+        std::vector<int64_t>& outputSplitSizes,
+        std::vector<int64_t>& inputSplitSizes,
+        const AllToAllOptions& opts = AllToAllOptions()) override;
+
     // new collective interfaces
     c10::intrusive_ptr<Work> _dummy_allgather_base(
         at::Tensor& outputbuffer,
         at::Tensor& inputbuffer,
         const AllgatherOptions& opts = AllgatherOptions());
+
+    template <typename Fn, typename PreProcess, typename PostProcess>
+    c10::intrusive_ptr<Work> ext_collective(
+        std::vector<at::Tensor>& inputs,
+        std::vector<at::Tensor>& outputs,
+        Fn fn,
+        PreProcess pre,
+        PostProcess post,
+        OpType opType,
+        const char* profilingTitle = nullptr,
+        bool avoidRecordStreams = false,
+        bool nanCheck = true);
 
     // factory method to create an extended nccl process group
     static c10::intrusive_ptr<Backend> createExtProcessGroupNCCL(

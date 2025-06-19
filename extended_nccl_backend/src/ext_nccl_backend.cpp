@@ -69,11 +69,67 @@ using intrusive_ptr_no_gil_destructor_class_ =
 
 namespace c10d {
 
+namespace {
+  // Check validity of tensor
+  void check_gpu_single_tensor(
+    const at::Tensor& tensor,
+    const bool p2p = false // whether operation is a P2P operation
+  ) {
+    if (!tensor.is_cuda() || tensor.is_sparse()) {
+      C10_THROW_ERROR(ValueError, "Tensors must be CUDA and dense");
+    }
+    // Skip the following requirements for P2P operations
+    if (!tensor.is_contiguous(tensor.suggest_memory_format())) {
+      if (p2p) {
+        TORCH_WARN_ONCE(
+            "Detected non-contiguous tensor in P2P operations. It is user "
+            "responsibility to guarantee that source and destination tensors have "
+            "the same contiguity format.");
+      } else {
+        C10_THROW_ERROR(ValueError, "Tensors must be contiguous");
+      }
+    }
+  }
+} // anonymous namespace
+
 // constructor
 ExtProcessGroupNCCL::ExtProcessGroupNCCL(
   c10::intrusive_ptr<c10d::Store> store,
   int rank,
-  int size) : ProcessGroupNCCL(store, rank, size) {}
+  int size) : ProcessGroupNCCL(store, rank, size) {
+    int globalRankStart_, globalRankStride_;
+    if (options_->global_ranks_in_group.empty()) {
+      globalRankStart_ = 0;
+    } else {
+      globalRankStart_ = options_->global_ranks_in_group[0];
+    }
+  
+    if (options_->global_ranks_in_group.empty()) {
+      globalRankStride_ = 1;
+    } else if (options_->global_ranks_in_group.size() == 1) {
+      globalRankStride_ = 0;
+    } else {
+        bool ranksAreStrided = true;
+        auto startRank = options_->global_ranks_in_group[0];
+        auto stride =
+            options_->global_ranks_in_group[1] - options_->global_ranks_in_group[0];
+        for (std::vector<uint64_t>::size_type i = 0;
+            i < options_->global_ranks_in_group.size();
+            i++) {
+          if (options_->global_ranks_in_group[i] != startRank + i * stride) {
+            ranksAreStrided = false;
+            break;
+          }
+        }
+    
+        if (ranksAreStrided) {
+          globalRankStride_ = options_->global_ranks_in_group[1] -
+              options_->global_ranks_in_group[0];
+        } else {
+          globalRankStride_ = -1;
+        }
+    }
+}
 
 // destructor
 ExtProcessGroupNCCL::~ExtProcessGroupNCCL() = default;
@@ -94,6 +150,199 @@ std::shared_ptr<c10d::NCCLComm> ExtProcessGroupNCCL::getTorchNCCLComm() {
 // }
 
 
+template <typename Fn, typename PreProcess, typename PostProcess>
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::ext_collective(
+    std::vector<at::Tensor>& inputs,
+    std::vector<at::Tensor>& outputs,
+    Fn fn,
+    PreProcess pre,
+    PostProcess post,
+    OpType opType,
+    const char* profilingTitle,
+    bool avoidRecordStreams,
+    bool nanCheck) {
+  // Environment setting by the user may add onto collective call's option
+  avoidRecordStreams |= avoidRecordStreams_;
+  nanCheck &= enableNanCheck_;
+
+  auto device = getDevice(inputs[0]);
+  // Guard must be created before `currentStreamCaptureStatusMayInitCtx`;
+  // otherwise, extra CUDA context could be created on device 0.
+  at::cuda::OptionalCUDAGuard gpuGuard(device);
+
+  c10::cuda::CaptureStatus capture_status =
+      c10::cuda::currentStreamCaptureStatusMayInitCtx();
+  errorIfCapturingNonCapturableNCCL(capture_status);
+
+  // Bump collective counter
+  if (!coalescing_state_) {
+    seqCollective_++;
+  }
+  op_id_++;
+
+  const auto key = getKeyFromDevice(device);
+  std::shared_ptr<NCCLComm> ncclComm = getNCCLComm(key);
+  if (ncclComm == nullptr) {
+    ncclComm = initNCCLComm(key, device, opType);
+  }
+
+  if (coalescing_state_ & CoalActive) {
+    if ((coalescing_state_ & CoalColl) == 0) {
+      // First op in coalesced operations
+      seqCollective_++;
+    }
+    coalescing_state_ |= CoalColl;
+    if (coalescedDevice_.index() < 0) {
+      coalescedDevice_ = device;
+    } else {
+      TORCH_CHECK(
+          coalescedDevice_.index() == device.index(), MULTI_DEVICE_ERROR_MSG);
+    }
+    if (coalescedComm_ == nullptr) {
+      coalescedComm_ = ncclComm;
+    } else {
+      TORCH_CHECK(coalescedComm_ == ncclComm, MULTI_DEVICE_ERROR_MSG);
+    }
+  }
+
+  // Used many times below, so we stash the unordered_map lookup
+  auto ncclStream = ncclStreams_.at(key);
+
+  // First let NCCL streams wait for input tensors allocation streams
+  syncStream(device, ncclEvents_[key], ncclStream);
+
+  bool enqueue =
+      !coalescing_state_ && capture_status == c10::cuda::CaptureStatus::None;
+  auto work = initWork(
+      device, rank_, opType, false, profilingTitle, inputs, outputs, enqueue);
+
+  // Store references to outputs to be used by WorkNCCL::result and operator<<.
+  work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
+
+  if (avoidRecordStreams) {
+    work->stashed_for_allocator_safety_ =
+        std::make_shared<std::vector<at::Tensor>>(inputs);
+  }
+
+  if (nanCheck) {
+    at::cuda::CUDAStreamGuard ncclStreamGuard(ncclStream);
+    for (const auto& input : inputs) {
+      bool nan = isnan(input)._is_any_true().item<bool>();
+      if (nan) {
+        throw std::runtime_error("NaN check failed in collective()");
+      }
+    }
+  }
+
+  // Start event should only be recorded before the ncclGroupStart()
+  if (work->timingEnabled_) {
+    work->ncclStartEvent_->record(ncclStream);
+  }
+
+  pre(ncclStream, work);
+
+  ncclComm_t comm = ncclComm->getNcclComm();
+
+  // Both `inputs' and `outputs' are created on a worker stream and used in
+  // different ncclStreams.  Hence, both must record the ncclStream to
+  // prevent being freed before the collective finishes.
+  //
+  // We only record `inputs' here, and leave recording `outputs' to `fn' for
+  // operations where `inputs' and `outputs' are not the same.
+  //
+  // See [Sync Streams].
+  if (!avoidRecordStreams) {
+    for (const auto& input : inputs) {
+      if (!input.is_sparse()) {
+        c10::cuda::CUDACachingAllocator::recordStream(
+            input.storage().data_ptr(), ncclStream);
+      } else {
+        // for sparse input case record streams on both index and value
+        // tensors
+        c10::cuda::CUDACachingAllocator::recordStream(
+            input.values().storage().data_ptr(), ncclStream);
+        c10::cuda::CUDACachingAllocator::recordStream(
+            input.indices().storage().data_ptr(), ncclStream);
+      }
+    }
+  }
+
+// Not all collectives have the same signature, e.g, all-reduce take in a Tensor
+// as the input and output while all-to-all take in a vector of Tensors as input
+// and output. Because we define the signature of the fn to take only single
+// tensor as input and output, we need to do a hack to get the first element in
+// the vector and pass it to fn.
+// TODO: we should clean up this in future (by either entirely removing lambda's
+// or removing input and output from lambda's signature).
+#ifndef NCCL_HAS_COMM_NONBLOCKING
+  C10D_NCCL_CHECK(
+      fn(inputs[0], outputs[0], comm, ncclStream),
+      ncclComm->getNcclCommFailureReason());
+#else
+  C10D_NCCL_CHECK_TIMEOUT(
+      fn(inputs[0], outputs[0], comm, ncclStream),
+      comm,
+      ncclComm->getNcclCommFailureReason());
+#endif
+
+  post(ncclStream, work);
+
+  // End event should only be recorded after the ncclGroupEnd()
+  if (!coalescing_state_) {
+    work->ncclEndEvent_->record(ncclStream);
+  }
+  work->ncclComm_ = ncclComm;
+
+  {
+    c10::cuda::CUDAMultiStreamGuard streamGuard(ncclStream);
+    std::vector<at::Device> devices{device};
+    work->future_ = c10::make_intrusive<at::ivalue::Future>(
+        c10::ListType::create(c10::TensorType::get()), devices);
+
+    // Add a callback that runs profiling end callbacks. wrapCallback() in CUDA
+    // future blocks the stream this callback runs on the corresponding
+    // ncclEndEvents_ ensuring appropriate synchronization.
+    if (work->recordFunctionEndCallback_) {
+      work->future_->addCallback(
+          [work](at::ivalue::Future& /* unused */) {
+            work->recordFunctionEndCallback_();
+          },
+          // uses_future = false allows us to skip synchronization in
+          // ivalue::Future, but is only valid as long as the lambda doesn't use
+          // the "Future" argument.
+          /*uses_future=*/false);
+    }
+    work->future_->markCompleted(at::IValue(*work->outputs_));
+  }
+
+  // Set appropriate work parameters.
+  work->blockingWait_ = blockingWait_;
+  work->avoidRecordStreams_ = avoidRecordStreams;
+  work->store_ = store_;
+  assignTimeoutToWork(work, options_);
+  // Record size info for debug. We only record the size on the first device as
+  // multi-device per process is deprecated
+  work->numelIn_ = 0;
+  work->numelOut_ = 0;
+  for (const auto& input : inputs) {
+    work->numelIn_ += input.numel();
+  }
+  for (const auto& output : outputs) {
+    work->numelOut_ += output.numel();
+  }
+
+  // Notify graphs before we check the capture status preemptively
+  at::cuda::CUDAGraph::inc_pending_event_queries();
+  if (enqueue) {
+    workEnqueue(work);
+  } else {
+    at::cuda::CUDAGraph::dec_pending_event_queries();
+  }
+
+  return work;
+}
+
+
 // overrided collective interfaces
 c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_allgather_base(
   at::Tensor& outputbuffer,
@@ -105,6 +354,130 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_allgather_base(
       inputbuffer,
       opts
   );
+}
+
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::alltoall_base(
+  at::Tensor& outputTensor,
+  at::Tensor& inputTensor,
+  std::vector<int64_t>& outputSplitSizes,
+  std::vector<int64_t>& inputSplitSizes,
+  const AllToAllOptions& /* unused */
+) {
+  check_gpu_single_tensor(outputTensor);
+  check_gpu_single_tensor(inputTensor);
+
+  int globalRankStart_ = getDeviceID(), globalRankStride_ = 1;
+
+  auto inputs = std::vector<at::Tensor>{inputTensor};
+  auto outputs = std::vector<at::Tensor>{outputTensor};
+
+  if (outputSplitSizes.empty() && inputSplitSizes.empty()) {
+    RECORD_PARAM_COMMS_DATA(
+        std::make_tuple(
+            static_cast<int64_t>(seqCollective_) + 1,
+            false), // seq + 1 to match collective
+        std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+        inputTensor, // inputTensor
+        outputTensor, // outputTensor
+        rank_, // rank
+        "all_to_all", // collective name
+        inputTensor.numel(), // inNelems
+        outputTensor.numel(), // outNelems
+        inputTensor.scalar_type(), // dType
+        std::vector<int64_t>(), // inSplitSizes
+        std::vector<int64_t>(), // outSplitSizes
+        globalRankStart_, // globalRankStart
+        globalRankStride_, // globalRankStride
+        this->getSize()); // worldSize
+
+    // avoidRecordStreams_ note: collective() will stash inputTensors and
+    // outputTensors.
+    return ext_collective(
+        inputs,
+        outputs,
+        [&](at::Tensor& input,
+            at::Tensor& output,
+            ncclComm_t comm,
+            at::cuda::CUDAStream& stream) {
+          // See [Sync Streams].
+          if (!avoidRecordStreams_) {
+            c10::cuda::CUDACachingAllocator::recordStream(
+                output.storage().data_ptr(), stream);
+          }
+          // torch::cuda::nccl::all2all_single_equal_split(
+          //     input, output, this->getSize(), comm, stream);
+          return ncclSuccess;
+        },
+        [](at::cuda::CUDAStream&,
+          c10::intrusive_ptr<ProcessGroupNCCL::WorkNCCL>& work) {},
+        [](at::cuda::CUDAStream&,
+            c10::intrusive_ptr<ProcessGroupNCCL::WorkNCCL>& work) {},
+        OpType::ALLTOALL_BASE,
+        "nccl:all_to_all");
+  } else {
+    c10d::checkSplitSizes(inputSplitSizes, inputTensor, size_);
+    c10d::checkSplitSizes(outputSplitSizes, outputTensor, size_);
+
+    RECORD_PARAM_COMMS_DATA(
+        std::make_tuple(
+            static_cast<int64_t>(seqCollective_) + 1,
+            false), // seq + 1 to match collective
+        std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+        inputTensor, // inputTensor
+        outputTensor, // outputTensor
+        rank_, // rank
+        "all_to_allv", // collective name
+        inputTensor.numel(), // inNelems
+        outputTensor.numel(), // outNelems
+        inputTensor.scalar_type(), // dType
+        inputSplitSizes, // inSplitSizes
+        outputSplitSizes, // outSplitSizes
+        globalRankStart_, // globalRankStart
+        globalRankStride_, // globalRankStride
+        this->getSize()); // worldSize
+
+    // avoidRecordStreams_ note: collective() will stash inputTensors and
+    // outputTensors.
+    return ext_collective(
+        inputs,
+        outputs,
+        [&](at::Tensor& input,
+            at::Tensor& output,
+            ncclComm_t comm,
+            at::cuda::CUDAStream& stream) {
+          std::vector<size_t> send_lengths(size_);
+          std::vector<size_t> recv_lengths(size_);
+          std::vector<size_t> send_offsets(size_);
+          std::vector<size_t> recv_offsets(size_);
+          c10d::computeLengthsAndOffsets(
+              inputSplitSizes, input, &send_lengths, &send_offsets);
+          c10d::computeLengthsAndOffsets(
+              outputSplitSizes, output, &recv_lengths, &recv_offsets);
+          // See [Sync Streams].
+          if (!avoidRecordStreams_) {
+            c10::cuda::CUDACachingAllocator::recordStream(
+                output.storage().data_ptr(), stream);
+          }
+          // torch::cuda::nccl::all2all_single_unequal_split(
+          //     input.data_ptr(),
+          //     send_lengths.data(),
+          //     send_offsets.data(),
+          //     output.data_ptr(),
+          //     recv_lengths.data(),
+          //     recv_offsets.data(),
+          //     input.element_size(),
+          //     input.scalar_type(),
+          //     comm,
+          //     stream);
+          return ncclSuccess;
+        },
+        [](at::cuda::CUDAStream&,
+          c10::intrusive_ptr<ProcessGroupNCCL::WorkNCCL>& work) {},
+        [](at::cuda::CUDAStream&,
+            c10::intrusive_ptr<ProcessGroupNCCL::WorkNCCL>& work) {},
+        OpType::ALLTOALL_BASE,
+        "nccl:all_to_all");
+  }
 }
 
 
