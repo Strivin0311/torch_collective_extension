@@ -69,51 +69,16 @@ using intrusive_ptr_no_gil_destructor_class_ =
 
 namespace c10d {
 
-// bool WorkExtNCCL::isCompleted() {
-//   return true;
-// }
-
-// bool WorkExtNCCL::isSuccess() const {
-//   return true;
-// }
-
-// bool WorkExtNCCL::wait(std::chrono::milliseconds /* unused */) {
-//   return true;
-// }
-
-// c10::intrusive_ptr<c10::ivalue::Future> WorkExtNCCL::getFuture() {
-//   return future_;
-// }
-
-// WorkExtNCCL::WorkExtNCCL(
-//   std::string pgUID,
-//   std::string pgDesc,
-//   at::Device& device,
-//   int rank,
-//   OpType opType,
-//   uint64_t seq,
-//   bool isP2P,
-//   const char* profilingTitle,
-//   const std::optional<std::vector<at::Tensor>>& inputs,
-//   bool enableTiming,
-//   bool cudaEventCacheEnabled,
-//   DebugLevel distDebugLevel
-// ): ProcessGroupNCCL::WorkNCCL(pgUID, pgDesc, device, rank, opType, seq, isP2P, profilingTitle, inputs, enableTiming, cudaEventCacheEnabled, distDebugLevel) {}
-
-
-// If necessary, pass store/rank/size to the ctor and exchange connection
-// information here
-// ExtProcessGroupNCCL::ExtProcessGroupNCCL(int rank, int size)
-//     : Backend(rank, size) {}
-
+// constructor
 ExtProcessGroupNCCL::ExtProcessGroupNCCL(
   c10::intrusive_ptr<c10d::Store> store,
   int rank,
   int size) : ProcessGroupNCCL(store, rank, size) {}
 
+// destructor
 ExtProcessGroupNCCL::~ExtProcessGroupNCCL() = default;
 
-// get the nccl cuda stream
+// get the nccl cuda stream w.r.t. collective comm
 at::cuda::CUDAStream& ExtProcessGroupNCCL::getNCCLStream() {
   return ncclStreams_.at(getDeviceKey());
 }
@@ -123,133 +88,57 @@ std::shared_ptr<c10d::NCCLComm> ExtProcessGroupNCCL::getTorchNCCLComm() {
   return devNCCLCommMap_.at(getDeviceKey());
 }
 
-
 // get the nccl comm ptr
 // int64_t ExtProcessGroupNCCL::getNCCLCommPtr() {
 //     return c10d::ProcessGroupNCCL::getCommPtr();
 // }
 
 
-// // This is a dummy allgather that sets all output tensors to zero
-// // Modify the implementation to conduct real communication asynchronously
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::allgather(
-//     std::vector<std::vector<at::Tensor>>& outputTensors,
-//     std::vector<at::Tensor>& inputTensors,
-//     const AllgatherOptions& /* unused */) {
-//   for (auto& outputTensorVec : outputTensors) {
-//       for (auto& outputTensor : outputTensorVec) {
-//           outputTensor.zero_();
-//       }
-//   }
+// overrided collective interfaces
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_allgather_base(
+  at::Tensor& outputbuffer,
+  at::Tensor& inputbuffer,
+  const AllgatherOptions& opts
+) { // fake override
+  return ProcessGroupNCCL::_allgather_base(
+      outputbuffer,
+      inputbuffer,
+      opts
+  );
+}
 
-//   auto future = c10::make_intrusive<c10::ivalue::Future>(
-//     c10::ListType::create(c10::ListType::create(c10::TensorType::get())));
-//   future->markCompleted(c10::IValue(outputTensors));
-//   return c10::make_intrusive<WorkExtNCCL>(OpType::ALLGATHER, std::move(future));
-// }
 
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_allgather_base(
-//     at::Tensor& /* unused */,
-//     at::Tensor& /* unused */,
-//     const AllgatherOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
+// new collective interfaces
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_dummy_allgather_base(
+  at::Tensor& outputbuffer,
+  at::Tensor& inputbuffer,
+  const AllgatherOptions& opts
+) {
+  printf("This is a dummy _allgather_base that sets output buffer to zero\n");
+  outputbuffer.zero_();
 
-// // This is a dummy allreduce that sets all output tensors to zero
-// // Modify the implementation to conduct real communication asynchronously
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::allreduce(
-//     std::vector<at::Tensor>& tensors,
-//     const AllreduceOptions& opts) {
-//   for (auto& tensor : tensors) {
-//       tensor.zero_();
-//   }
+  auto inputs = std::vector<at::Tensor>{inputbuffer};
+  auto outputs = std::vector<at::Tensor>{outputbuffer};
 
-//   auto future = c10::make_intrusive<c10::ivalue::Future>(
-//     c10::ListType::create(c10::TensorType::get()));
-//   future->markCompleted(c10::IValue(tensors));
-//   return c10::make_intrusive<WorkExtNCCL>(OpType::ALLREDUCE, std::move(future));
-// }
+  auto device = getDevice();
+  int rank = getDeviceID();
 
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::allreduce_coalesced(
-//     std::vector<at::Tensor>& /* unused */,
-//     const AllreduceCoalescedOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
+  auto work = initWork(
+      device,
+      rank,
+      OpType::ALLGATHER,
+      false, /*isP2P*/
+      "_allgather_base_dummy",
+      inputs,
+      outputs,
+      true /*record*/
+  );
 
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::alltoall(
-//     std::vector<at::Tensor>& /* unused */,
-//     std::vector<at::Tensor>& /* unused */,
-//     const AllToAllOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
+  return work;
+}
 
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::alltoall_base(
-//     at::Tensor& outputTensor,
-//     at::Tensor& inputTensor,
-//     std::vector<int64_t>& outputSplitSizes,
-//     std::vector<int64_t>& inputSplitSizes,
-//     const AllToAllOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
 
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::barrier(
-//     const BarrierOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
-
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::broadcast(
-//     std::vector<at::Tensor>& tensors,
-//     const BroadcastOptions& opts) {
-//   throw std::runtime_error("not supported");
-// }
-
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::gather(
-//     std::vector<std::vector<at::Tensor>>& /* unused */,
-//     std::vector<at::Tensor>& /* unused */,
-//     const GatherOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
-
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::reduce(
-//     std::vector<at::Tensor>& /* unused */,
-//     const ReduceOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
-
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::reduce_scatter(
-//     std::vector<at::Tensor>& /* unused */,
-//     std::vector<std::vector<at::Tensor>>& /* unused */,
-//     const ReduceScatterOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
-
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::scatter(
-//     std::vector<at::Tensor>& /* unused */,
-//     std::vector<std::vector<at::Tensor>>& /* unused */,
-//     const ScatterOptions& /* unused */) {
-//   throw std::runtime_error("not supported");
-// }
-
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::send(
-//     std::vector<at::Tensor>& tensors,
-//     int dstRank,
-//     int tag) {
-//   throw std::runtime_error("not supported");
-// }
-
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::recv(
-//     std::vector<at::Tensor>& tensors,
-//     int srcRank,
-//     int tag) {
-//   throw std::runtime_error("not supported");
-// }
-
-// c10::intrusive_ptr<Work> ExtProcessGroupNCCL::recvAnysource(
-//     std::vector<at::Tensor>& tensors,
-//     int tag) {
-//   throw std::runtime_error("not supported");
-// }
-
+// factory method to create an extended nccl process group
 c10::intrusive_ptr<Backend> ExtProcessGroupNCCL::createExtProcessGroupNCCL(
     const c10::intrusive_ptr<::c10d::Store>& store,
     int rank,
@@ -291,6 +180,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("rank"),
           py::arg("size"),
           "Constructor to create ExtProcessGroupNCCL instance"
+      )
+      .def(
+        "_dummy_allgather_base",
+        &ExtProcessGroupNCCL::_dummy_allgather_base,
+        py::arg("output"),
+        py::arg("input"),
+        py::arg("opts")
       )
       .def_property_readonly(
         "nccl_stream",

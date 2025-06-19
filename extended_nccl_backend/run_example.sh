@@ -12,7 +12,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
-export EXAMPLE_PROFILE_MODE=1
+export EXAMPLE_PROFILE_MODE=0
 
 CMD="torchrun \
     --standalone \

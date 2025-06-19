@@ -7,6 +7,8 @@ import torch.distributed as dist
 import ext_nccl_backend
 from ext_nccl_backend import ExtProcessGroupNCCL
 from src import nvtx
+from src.ext_distributed_c10d import dummy_all_gather_into_tensor
+
 
 # init process group
 dist.init_process_group(
@@ -46,6 +48,8 @@ assert isinstance(pg_backend, ExtProcessGroupNCCL), (
 x = torch.zeros(world_size) + rank
 y = x.to(device)
 z = y.clone()
+p = torch.arange(world_size, device=device, dtype=torch.float32) + rank
+gp = torch.empty(world_size**2, device=device, dtype=torch.float32)
 
 
 # --- try simple functionalities --- #
@@ -58,17 +62,39 @@ z = y.clone()
 # this goes through gloo backend
 dist.all_reduce(x, group=world_group)
 ans = world_size * (world_size - 1) // 2
-print(f"[RANK {rank}] expected all-reduce value: {ans=}, and actual value: {x=}") # the result should be [ans] * size
+print(f"[RANK {rank}] cpu all-reduce for gloo backend: expected value: {ans=}, and actual value: {x=}") # the result should be [ans] * size
 
 # this goes through nccl backend
 dist.all_reduce(y, group=world_group)  # the result should be [ans] * size
-print(f"[RANK {rank}] cuda allreduce: {y}")
+print(f"[RANK {rank}] cuda all-reduce for ext_nccl_backend: expected value: {ans=}, and actual value: {y=}")
 
 dist.broadcast(z, 0, group=pg) # the result should be [0] * size
-print(f"[RANK {rank}] cuda broadcast: {z}")
+print(f"[RANK {rank}] cuda broadcast for ext_nccl_backend: expected value: 0, and actual value: {z=}")
+
+work = dist.all_gather_into_tensor(
+    gp,
+    p,
+    group=world_group,
+    async_op=True,
+)
+work.wait()
+print(f"[RANK {rank}] cuda all-gather for ext_nccl_backend {p=} into {gp=}")
+
+
+work = dummy_all_gather_into_tensor(
+    gp,
+    p,
+    group=backend,
+    async_op=True,
+)
+work.wait()
+print(f"[RANK {rank}] cuda dummy all-gather for ext_nccl_backend {p=} into {gp=}")
 
 
 # --- try multi-stream --- #
+
+dist.barrier()
+torch.cuda.synchronize()
 
 side_stream = torch.cuda.Stream()
 print(f"[RANK {rank}] {side_stream=} | {side_stream.stream_id=} | {side_stream.device_index=} | {side_stream.device_type=}")
@@ -83,7 +109,10 @@ s = torch.randn((m,n), device=device, dtype=torch.float32)
 g = torch.empty((m*world_size, n), device=device, dtype=torch.float32)
 
 profile_mode = os.environ.get("EXAMPLE_PROFILE_MODE", "0") == "1"
-prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
+if profile_mode:
+    prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
+else:
+    prof_iters, prof_start_iter, prof_end_iter = 1, 0, 0
 
 for iter in range(prof_iters):
     if profile_mode:
