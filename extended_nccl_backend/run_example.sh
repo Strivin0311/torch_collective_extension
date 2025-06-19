@@ -8,9 +8,11 @@ export MASTER_ADDRESS="localhost"
 export MASTER_PORT=23457
 
 export OMP_NUM_THREADS=1
+export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
+export EXAMPLE_PROFILE_MODE=1
 
 CMD="torchrun \
     --standalone \
@@ -21,12 +23,12 @@ CMD="torchrun \
     example.py
 "
 
-# uncomment the following two lines if not profiling
-# $CMD > example.log 2>&1
-# exit
-
-nsys profile \
-    --force-overwrite true \
-    -o example.nsys-rep \
-    --capture-range=cudaProfilerApi \
+if [[ $EXAMPLE_PROFILE_MODE == "1" ]]; then
+    nsys profile \
+        --force-overwrite true \
+        -o example.nsys-rep \
+        --capture-range=cudaProfilerApi \
+        $CMD > example.log 2>&1
+else
     $CMD > example.log 2>&1
+fi

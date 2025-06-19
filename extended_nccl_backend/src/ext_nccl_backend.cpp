@@ -312,17 +312,53 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            *    return py::reinterpret_steal<py::object>(THPStream_Wrap(c10_stream));
            * 
            * Therefore, we directly access the torch.cuda.Stream module 
-           * and initialize a pybind object with the internal cuda stream ptr
+           * and initialize a pybind object with the internal cuda stream ptr as kwargs
            */
-          auto cuda_stream = self.getNCCLStream();
+
+          thread_local py::object cached_nccl_stream = py::none();
+          if (!cached_nccl_stream.is_none()) { // already cached
+              return cached_nccl_stream;
+          }
+
+          /* everything is ok, only the stream id is not identical, but seems no problem  */
+          at::cuda::CUDAStream cuda_stream = self.getNCCLStream();
           auto torch = py::module::import("torch");
-          auto cuda_module = torch.attr("cuda");
-          auto stream_type = cuda_module.attr("Stream");
-          
-          return stream_type(
-              py::cast(cuda_stream.device_index()),
-              py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()))
-          );
+          auto torch_cuda_stream_class = torch.attr("cuda").attr("Stream");
+          py::kwargs kwargs;
+          kwargs["stream_ptr"] = py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()));
+          cached_nccl_stream = torch_cuda_stream_class(**kwargs);
+          return cached_nccl_stream;
+
+          /* valid but only create a torch.Stream, and the stream ptr seems to be wrong */
+          // auto cuda_stream_base = torch.attr("_C").attr("_CudaStreamBase");
+          // return cuda_stream_base(
+          //     py::arg("priority") = 0,
+          //     py::arg("stream_id") = 0,
+          //     py::arg("device_index") = cuda_stream.device_index(),
+          //     py::arg("stream_ptr") = reinterpret_cast<uintptr_t>(cuda_stream.stream())
+          // );
+
+          /* invalid: RuntimeError: Expected stream_.device_type() == DeviceType::CUDA to be true, but got false */
+          // auto kwargs = py::dict();
+          // kwargs["device_index"] = py::cast(cuda_stream.device_index());
+          // kwargs["stream_id"] = py::cast(cuda_stream.id());
+          // kwargs["stream_ptr"] = py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()));
+          // return torch_cuda_stream_class(**kwargs);
+
+          /* valid but stream ptr wrong */
+          // return torch_cuda_stream_class(
+          //     py::cast(cuda_stream.device_index()),
+          //     py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()))
+          // );
+
+          /* invalid */
+          // return torch_cuda_stream_class(
+          //     py::none(),                   // priority (ignored)
+          //     py::none(),                   // stream_id (ignored)
+          //     py::cast(cuda_stream.device_index()),
+          //     py::cast(static_cast<int64_t>(c10::DeviceType::CUDA)),
+          //     py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()))
+          // );
         },
         R"(Return the NCCL cuda stream w.r.t the current device)"
       )
