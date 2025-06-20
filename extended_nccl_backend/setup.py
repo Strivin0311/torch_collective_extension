@@ -7,7 +7,12 @@ from setuptools import setup
 from torch.utils import cpp_extension
 
 # self include and source
-sources = ["src/ext_nccl_backend.cpp"]
+sources = [
+    "src/ext_nccl_backend.cpp",
+    "src/ext_nccl_comm.cpp",
+    "src/ext_flight_recorder.cpp",
+]
+
 include_dirs = [
     f"{os.path.dirname(os.path.abspath(__file__))}/include/",
 ]

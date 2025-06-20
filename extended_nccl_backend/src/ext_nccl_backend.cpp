@@ -1,4 +1,5 @@
 #include "../include/ext_nccl_backend.hpp"
+#include "../include/ext_flight_recorder.hpp"
 
 #ifndef USE_C10D_NCCL
 #define USE_C10D_NCCL
@@ -382,8 +383,8 @@ bool ExtProcessGroupNCCL::ExtWorkNCCL::checkTimeout(
 void ExtProcessGroupNCCL::ExtWorkNCCL::printTraceback() const {
   // First step we get the corresponding record entry from FR, based on work's
   // trace_id_
-  std::optional<FlightRecorder::Entry> entry =
-      FlightRecorder::get()->getEntry(trace_id_);
+  std::optional<ExtFlightRecorder::Entry> entry =
+      ExtFlightRecorder::get()->getEntry(trace_id_);
   if (entry.has_value()) {
     auto entryVal = entry.value();
     // Get stack trace from FR entry, in string format
@@ -401,7 +402,7 @@ void ExtProcessGroupNCCL::ExtWorkNCCL::printTraceback() const {
   } else {
     LOG(ERROR)
         << "Stack trace of the failed collective not found, "
-        << "potentially because FlightRecorder is disabled. "
+        << "potentially because ExtFlightRecorder is disabled. "
         << "You can enable it by setting TORCH_NCCL_TRACE_BUFFER_SIZE to a non-zero value.";
   }
 }
@@ -618,6 +619,25 @@ ExtProcessGroupNCCL::ExtProcessGroupNCCL(
 // destructor
 ExtProcessGroupNCCL::~ExtProcessGroupNCCL() = default;
 
+
+void ExtProcessGroupNCCL::startCoalescing() {
+  // Other collective ops bump seq_ before creating a work. Thus, if coalesced
+  // ops bump seq_ only after initing a work they will collide with (reuse) the
+  // seq_ of the last non-coalesced collective.  Previously, seq_ was bumped
+  // inside endCoalescing, but before initWork. Since we now record individual
+  // ops from a coalesce group into the flight recorder, we want to have the
+  // same seq_ for those ops and its 'endCoalescing' op. Hence we bump during
+  // start, which has one minor downside- we burn a seq_ if someone ever does a
+  // 'start' and 'end' coalescing region without doing an operation inbetween.
+
+  // coalescedDevice_.set_index(-1);
+  // coalescedComm_ = nullptr;
+  // coalescing_state_ |= CoalActive;
+  // groupStart();
+
+  TORCH_CHECK(false, "ExtProcessGroupNCCL does not support coalescing");
+}
+
 // get the nccl cuda stream w.r.t. collective comm
 at::cuda::CUDAStream& ExtProcessGroupNCCL::getNCCLStream() {
   return ncclStreams_.at(getDeviceKey());
@@ -709,7 +729,7 @@ c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL> ExtProcessGroupNCCL::initEx
     //   these objects to the Work becuase it has implications for keeping those
     //   tensors alive longer and adds overhead when copying Work objects
     //   between threads
-    r->trace_id_ = FlightRecorder::get()->record(
+    r->trace_id_ = ExtFlightRecorder::get()->record(
         local_id_,
         std::make_tuple(pg_uid_, pg_desc_),
         seqCollective_,
@@ -913,7 +933,7 @@ std::shared_ptr<ExtNCCLComm> ExtProcessGroupNCCL::initExtNCCLComm(
     inInitializationExtCommMap_.emplace(deviceKey, extNcclComm);
   }
 
-  FlightRecorder::get()->record_pg_ranks(
+  ExtFlightRecorder::get()->record_pg_ranks(
       std::make_tuple(pg_uid_, pg_desc_), extGroupRanks());
 
   RECORD_PARAM_COMMS(
@@ -1033,24 +1053,25 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::ext_collective(
     extNcclComm = initExtNCCLComm(key, device, opType);
   }
 
-  if (coalescing_state_ & ExtCoalActive) {
-    if ((coalescing_state_ & ExtCoalColl) == 0) {
-      // First op in coalesced operations
-      seqCollective_++;
-    }
-    coalescing_state_ |= ExtCoalColl;
-    if (coalescedDevice_.index() < 0) {
-      coalescedDevice_ = device;
-    } else {
-      TORCH_CHECK(
-          coalescedDevice_.index() == device.index(), EXT_MULTI_DEVICE_ERROR_MSG);
-    }
-    if (coalescedComm_ == nullptr) {
-      coalescedComm_ = extNcclComm;
-    } else {
-      TORCH_CHECK(coalescedComm_ == extNcclComm, EXT_MULTI_DEVICE_ERROR_MSG);
-    }
-  }
+  TORCH_CHECK(coalescing_state_ == 0, "ExtProcessGroupNCCL does not support coalescing");
+  // if (coalescing_state_ & ExtCoalActive) {
+  //   if ((coalescing_state_ & ExtCoalColl) == 0) {
+  //     // First op in coalesced operations
+  //     seqCollective_++;
+  //   }
+  //   coalescing_state_ |= ExtCoalColl;
+  //   if (coalescedDevice_.index() < 0) {
+  //     coalescedDevice_ = device;
+  //   } else {
+  //     TORCH_CHECK(
+  //         coalescedDevice_.index() == device.index(), EXT_MULTI_DEVICE_ERROR_MSG);
+  //   }
+  //   if (coalescedComm_ == nullptr) {
+  //     coalescedComm_ = extNcclComm;
+  //   } else {
+  //     TORCH_CHECK(coalescedComm_ == extNcclComm, EXT_MULTI_DEVICE_ERROR_MSG);
+  //   }
+  // }
 
   // Used many times below, so we stash the unordered_map lookup
   auto ncclStream = getNCCLStream();

@@ -1,9 +1,74 @@
 
 #pragma once
 
-#ifdef USE_C10D_NCCL
+#ifndef USE_C10D_NCCL
+#define USE_C10D_NCCL
+#endif
 
 #include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
+
+
+// Default value: 30 minutes
+static int ncclNonblockingTimeout() {
+  static int timeout = -2; // -2 means not initialized
+  if (timeout == -2) {
+    const auto val = c10::utils::get_env("TORCH_NCCL_NONBLOCKING_TIMEOUT");
+    if (val.has_value() && !val.value().empty()) {
+      timeout = stoi(val.value());
+    } else {
+      // Default value consistent with kBackendDefaultTimeout
+      timeout = 30 * 60;
+    }
+  }
+  return timeout;
+}
+
+
+// Macro to throw on a non-successful NCCL return value, non-blocking.
+#ifdef C10D_NCCL_CHECK_TIMEOUT_BASE
+#undef C10D_NCCL_CHECK_TIMEOUT_BASE
+#endif
+#define C10D_NCCL_CHECK_TIMEOUT_BASE(cmd, comm, failureReason, yield_fn)      \
+  do {                                                                        \
+    ncclResult_t result = cmd;                                                \
+    auto startTimepoint = std::chrono::steady_clock::now();                   \
+    auto timeout = ncclNonblockingTimeout();                                \
+    while (result == ncclInProgress) {                                        \
+      C10D_CHECK_TIMEOUT(startTimepoint, timeout);                            \
+      yield_fn;                                                               \
+      ncclCommGetAsyncError(comm, &result);                                   \
+    }                                                                         \
+    if (result != ncclSuccess) {                                              \
+      std::string err = "NCCL error in: " + std::string(__FILE__) + ":" +     \
+          std::to_string(__LINE__) + ", " + ncclGetErrorWithVersion(result) + \
+          "\n" + getNcclErrorDetailStr(result, failureReason);                \
+      TORCH_CHECK_WITH(DistBackendError, false, err);                         \
+    }                                                                         \
+  } while (0)
+
+
+#ifdef C10D_NCCL_CHECK_TIMEOUT_GROUPEND
+#undef C10D_NCCL_CHECK_TIMEOUT_GROUPEND
+#endif
+#define C10D_NCCL_CHECK_TIMEOUT_GROUPEND(cmd, comm, failureReason)           \
+  do {                                                                       \
+    ncclResult_t state = cmd;                                                \
+    auto startTimepoint = std::chrono::steady_clock::now();                  \
+    auto timeout = ncclNonblockingTimeout();                               \
+    if (state == ncclInProgress) {                                           \
+      do {                                                                   \
+        C10D_CHECK_TIMEOUT(startTimepoint, timeout);                         \
+        sched_yield();                                                       \
+        ncclCommGetAsyncError(comm->getNcclComm(), &state);                  \
+      } while (state == ncclInProgress);                                     \
+    }                                                                        \
+    if (state != ncclSuccess) {                                              \
+      std::string err = "NCCL error in: " + std::string(__FILE__) + ":" +    \
+          std::to_string(__LINE__) + ", " + ncclGetErrorWithVersion(state) + \
+          "\n" + getNcclErrorDetailStr(state, failureReason);                \
+      TORCH_CHECK_WITH(DistBackendError, false, err);                        \
+    }                                                                        \
+  } while (0)
 
 
 namespace c10d {
@@ -128,5 +193,3 @@ private:
 };
 
 } // namespace c10d
-
-#endif

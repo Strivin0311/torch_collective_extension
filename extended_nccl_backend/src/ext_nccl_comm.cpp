@@ -1,4 +1,6 @@
-#ifdef USE_C10D_NCCL
+#ifndef USE_C10D_NCCL
+#define USE_C10D_NCCL
+#endif
 
 #include "../include/ext_nccl_comm.hpp"
 
@@ -184,7 +186,7 @@ std::shared_ptr<ExtNCCLComm> ExtNCCLComm::split(
     // comm ptr is valid. Therefore we add a manual wait here for safety.
     // TODO: remove this wait after NCCL fix the semantics.
     auto startTime = std::chrono::steady_clock::now();
-    auto timeout = nccl_nonblocking_timeout();
+    auto timeout = ncclNonblockingTimeout();
     while (!comm->ncclComm_) {
         C10D_CHECK_TIMEOUT(startTime, timeout);
         C10D_SCHED_SLEEP();
@@ -387,5 +389,3 @@ std::unordered_map<std::string, std::string> ExtNCCLComm::ncclCommDump() {
 #endif
 
 } // namespace c10d
-
-#endif

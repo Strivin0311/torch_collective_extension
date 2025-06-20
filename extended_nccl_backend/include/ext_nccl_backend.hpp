@@ -242,6 +242,8 @@ public:
     // destructor
     ~ExtProcessGroupNCCL() override;
 
+    void startCoalescing() override;
+
     // get the nccl cuda stream w.r.t. collective comm
     at::cuda::CUDAStream& getNCCLStream();
 
