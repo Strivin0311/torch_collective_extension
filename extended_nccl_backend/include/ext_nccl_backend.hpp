@@ -6,14 +6,20 @@
 
 #include <torch/python.h>
 
+#include <ATen/cuda/CUDAGraph.h>
 #include <torch/csrc/Stream.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Work.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Utils.hpp>
+#include <torch/csrc/distributed/c10d/FlightRecorder.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 #include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
+#include <torch/csrc/cuda/nccl.h>
+#include <c10/util/WaitCounter.h>
+// #include <c10/util/Exception.h>
+
 
 /** NOTE: in this header file, pytorch defines a lot of type_caster 
  * to let pybind automatically convert between c++ and python types,
@@ -24,10 +30,209 @@
 
 #include <pybind11/chrono.h>
 
+#include "ext_nccl_comm.hpp"
+
+
 namespace c10d {
 
 class TORCH_API ExtProcessGroupNCCL : public ProcessGroupNCCL {
 public:
+    // copied from WorkNCCL in torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp
+    // since we need a work class to set ExtProcessGroupNCCL to be its friend class
+    // REVIEW: is it better or worse to inherit from WorkNCCL?
+    class ExtWorkNCCL : public Work, public std::enable_shared_from_this<ExtWorkNCCL> {
+    public:
+        friend struct WorkInfo;
+    
+        // Constructor takes a list of CUDA devices
+        ExtWorkNCCL(
+            std::string pgUID,
+            std::string pgDesc,
+            at::Device& device,
+            int rank,
+            OpType opType,
+            uint64_t seq,
+            bool isP2P = false,
+            const char* profilingTitle = nullptr,
+            const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt,
+            bool desyncDebug = false,
+            bool enableTiming = false,
+            bool cudaEventCacheEnabled = false,
+            DebugLevel distDebugLevel = DebugLevel::Off);
+        // Copy constructor doing partial copy without outputs_. Cleanup thread
+        // monitors and removes finished works. However it will deadlock when
+        // destructs outputs_ tensors who are view tensors in autograd graph.
+        ExtWorkNCCL(const ExtWorkNCCL& w);
+    
+        ~ExtWorkNCCL() override;
+    
+        // Checks if the NCCL kernel has started to execute.
+        bool isStarted();
+    
+        // Checks if request has completed. In this specific case of NCCL, it checks
+        // if the NCCL operation has completed on the GPU in its own NCCL stream.
+        // Non-blocking operation.
+        bool isCompleted() override;
+    
+        bool isSuccess() const override;
+    
+        // Same as calling synchronize() for NCCL work if timeout is not set.
+        // Otherwise, it will block the CPU thread until the NCCL work is completed
+        // or timed out. If timeout, exception will be thrown.
+        bool wait(std::chrono::milliseconds timeout = kNoTimeout) override;
+    
+        void abort() override;
+    
+        // Let current stream wait on the completion of the NCCL work
+        // Throws on exceptions.
+        void synchronize() override;
+    
+        // Synchronize streams by blocking each on the NCCL stream
+        void synchronizeStream();
+    
+        // Helper function to handle exception (throw if needed).
+        void handleException(ErrorHandlingMode asyncErrorHandling);
+    
+        // Helper function that checks if the NCCL kernels have finished
+        // execution on the GPUs
+        bool finishedGPUExecution();
+    
+        // Get a Future object that will be marked as completed internally.
+        c10::intrusive_ptr<c10::ivalue::Future> getFuture() override;
+    
+        // Get a Future result of each work (e.g. success, different error types).
+        // instead of the tensor output.
+        c10::intrusive_ptr<c10::ivalue::Future> getFutureResult() override;
+    
+        float getDuration() const override;
+    
+        uint64_t getSequencenumber() const override;
+    
+        const std::string& logPrefix() const;
+    
+        // Helper function that sets an exception_ptr on the ExtWorkNCCL object.
+        void setException(std::exception_ptr exception_ptr);
+    
+        // Helper function that returns True if the ExtWorkNCCL object has timed out
+        // and False otherwise.
+        // In case of timeout, set exception on the ExtWorkNCCL object.
+        bool checkTimeout(
+            std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+    
+        // Print the traceback of the collective at call time
+        void printTraceback() const;
+    
+        std::vector<at::Tensor> result() override;
+    
+    protected:
+        // The process group unique id
+        std::string pgUID_;
+    
+        // The process group description
+        std::string pgDesc_;
+    
+        // The cached list of CUDA devices to operate on
+        at::Device device_;
+    
+        // The start CUDA event of NCCL operator tracking this work item. These
+        // start CUDA events are needed by desync debugging if enabled.
+        std::shared_ptr<at::cuda::CUDAEvent> ncclStartEvent_;
+    
+        // The end CUDA event of NCCL operator tracking this work item.
+        std::shared_ptr<at::cuda::CUDAEvent> ncclEndEvent_;
+
+        // The ext NCCL communicator used for this work item.
+        std::shared_ptr<ExtNCCLComm> extNcclComm_;
+    
+        // whether this work is a barrier op
+        bool isBarrierOp_{false};
+    
+        // Clone of blockingWait_ from ProcessGroupNCCL.
+        bool blockingWait_{false};
+    
+        // Clone of avoidRecordStreams_ from ProcessGroupNCCL.
+        bool avoidRecordStreams_{false};
+    
+        // Clone of opTimeout_ from ProcessGroupNCCL.
+        std::chrono::milliseconds opTimeout_{};
+    
+        // Ephemeral timeouts are owned by exactly one work,
+        // and reset after that work completes.
+        // There may be more than one ephemeral timeout active at the same time,
+        // and this variable is used to track the ownership of ephemeral timeout.
+        std::chrono::milliseconds ownedEphermeralTimeout_ =
+            std::chrono::milliseconds(0);
+    
+        // Time point representing when the work started.
+        std::chrono::time_point<std::chrono::steady_clock> workStartTime_;
+    
+        // Record the sequential number of collective or p2p.
+        uint64_t seq_;
+        bool isP2P_;
+    
+        // Indicates if the nccl start event has been updated to the store trace.
+        // This will be used by desync debug.
+        bool startTraceUpdated_{false};
+    
+        // Record collective sizes for debug. We only record the size on the first
+        // device as multi-device per process is deprecated
+        size_t numelIn_ = -1;
+        size_t numelOut_ = -1;
+    
+        // Wrapper method for the static checkForNCCLErrors which can be overridden
+        // for tests.
+        virtual std::exception_ptr checkForNCCLErrors();
+    
+        friend std::ostream& operator<<(
+            std::ostream& output,
+            const ExtWorkNCCL& ExtWorkNCCL);
+    
+    private:
+        // Checks for NCCL errors and sets an appropriate exception_ptr.
+        void checkAndSetException();
+    
+        // Just checks whether GPU execution has started, without modifying
+        // exception_ptr.
+        bool startedGPUExecutionInternal() const;
+    
+        // Just checks whether GPU execution has completed, without modifying
+        // exception_ptr.
+        bool finishedGPUExecutionInternal() const;
+    
+        // Reference to the store so that we can write aborted communicators
+        // to the store.
+        c10::intrusive_ptr<Store> store_;
+    
+        // Store a reference to NCCL collective's outputs, used by result and to
+        // give a more descriptive message when representing the Work as a string.
+        std::shared_ptr<std::vector<at::Tensor>> outputs_;
+    
+        // TORCH_NCCL_AVOID_RECORD_STREAMS implementation helper.
+        // Stores references to participating non-output tensors (ie inputs,
+        // flattened intermediates).
+        // We'll clear this list in synchronizeStream, just after user-facing
+        // stream(s) are synced with the nccl work stream(s).
+        // By keeping these refs (as well as outputs_) alive until after the
+        // collective's work rejoins the user-facing streams, we achieve
+        // caching allocator safety without any recordStream calls.
+        // For in-place collectives, some refs stashed here may alias outputs_,
+        // but that doesn't do any harm.
+        std::shared_ptr<std::vector<at::Tensor>> stashed_for_allocator_safety_;
+    
+        // The future returned by getFuture.
+        c10::intrusive_ptr<at::ivalue::Future> future_;
+    
+        // the future result (e.g., success or failure) of the work
+        c10::intrusive_ptr<at::ivalue::Future> futureWorkResult_;
+    
+        bool timingEnabled_;
+        // unique id used to tell the trace buffer that this
+        // work has completed
+        std::optional<uint64_t> trace_id_;
+        DebugLevel distDebugLevel_;
+        friend class ExtProcessGroupNCCL;
+    };
+
     // constructor
     ExtProcessGroupNCCL(
         c10::intrusive_ptr<Store> store,
@@ -93,18 +298,6 @@ public:
         at::Tensor& inputbuffer,
         const AllgatherOptions& opts = AllgatherOptions());
 
-    template <typename Fn, typename PreProcess, typename PostProcess>
-    c10::intrusive_ptr<Work> ext_collective(
-        std::vector<at::Tensor>& inputs,
-        std::vector<at::Tensor>& outputs,
-        Fn fn,
-        PreProcess pre,
-        PostProcess post,
-        OpType opType,
-        const char* profilingTitle = nullptr,
-        bool avoidRecordStreams = false,
-        bool nanCheck = true);
-
     // factory method to create an extended nccl process group
     static c10::intrusive_ptr<Backend> createExtProcessGroupNCCL(
         const c10::intrusive_ptr<::c10d::Store>& store,
@@ -133,6 +326,69 @@ public:
             "cuda" // supported devices: Optional[Union[str, List[str]]] = None, set to only cuda
         );
     }
+protected:
+    int globalRankStart_, globalRankStride_;
+
+    // Vector to Store ExtWorkNCCL pointers
+    std::list<ExtProcessGroupNCCL::ExtWorkNCCL> extWorkMetaList_;
+
+    std::list<ExtProcessGroupNCCL::ExtWorkNCCL> completedExtWorkList_;
+
+    std::unordered_map<std::string, std::shared_ptr<ExtNCCLComm>> devExtNCCLCommMap_;
+
+    // The NCCL communicators currently in process of being initialized.
+    std::unordered_map<std::string, std::shared_ptr<ExtNCCLComm>> inInitializationExtCommMap_;
+
+    template <typename Fn, typename PreProcess, typename PostProcess>
+    c10::intrusive_ptr<Work> ext_collective(
+        std::vector<at::Tensor>& inputs,
+        std::vector<at::Tensor>& outputs,
+        Fn fn,
+        PreProcess pre,
+        PostProcess post,
+        OpType opType,
+        const char* profilingTitle = nullptr,
+        bool avoidRecordStreams = false,
+        bool nanCheck = true);
+
+    void assignTimeoutToExtWork(
+        const c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work,
+        const c10::intrusive_ptr<Options>& option);
+
+    // Checks for NCCL errors on each of the communicators and returns an
+    // appropriate exception_ptr (nullptr if no errors).
+    static std::exception_ptr checkForNCCLErrorsInternal(
+        std::shared_ptr<ExtNCCLComm>& ncclComm);
+
+    // Ensure thaht if record is True, the work obj will be enqueued via
+    // workEnqueue
+    virtual c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL> initExtWork(
+        at::Device& device,
+        int rank,
+        OpType opType,
+        bool isP2P,
+        const char* profilingTitle = nullptr,
+        const std::vector<at::Tensor>& inputs = {},
+        const std::vector<at::Tensor>& outputs = {},
+        bool record = false);
+
+    // Add ExtWork Pointer to workVector
+    void extWorkEnqueue(const c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>&);
+
+    // Helper that looks up the cached extended NCCL communicators only
+    std::shared_ptr<ExtNCCLComm> getExtNCCLComm(const std::string& deviceKey);
+
+    std::shared_ptr<ExtNCCLComm> initExtNCCLComm(
+        const std::string& deviceKey,
+        at::Device& device,
+        OpType opType,
+        int p2pRank = 0,
+        bool isSendRecvSelf = false);
+
+    std::string createExtLogPrefix() const;
+
+    // Returns the global ranks of a PG.
+    const std::vector<uint64_t>& extGroupRanks() const;
 };
 
 } // namespace c10d
