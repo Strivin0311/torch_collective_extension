@@ -23,3 +23,12 @@ class ExtProcessGroupNCCL(dist.ProcessGroupNCCL):
         input: torch.Tensor,
         opts=...,
     ) -> dist.Work: ...
+    
+    def extended_alltoall_base(
+        self,
+        output_tensor: torch.Tensor,
+        input_tensor: torch.Tensor,
+        output_split_sizes: list[int],
+        input_split_sizes: list[int],
+        opts=...,
+    ) -> dist.Work: ...

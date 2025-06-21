@@ -287,18 +287,18 @@ public:
         at::Tensor& inputbuffer,
         const AllgatherOptions& opts = AllgatherOptions()) override;
 
-    c10::intrusive_ptr<Work> alltoall_base(
-        at::Tensor& outputTensor,
-        at::Tensor& inputTensor,
-        std::vector<int64_t>& outputSplitSizes,
-        std::vector<int64_t>& inputSplitSizes,
-        const AllToAllOptions& opts = AllToAllOptions()) override;
-
     // new collective interfaces
     c10::intrusive_ptr<Work> _dummy_allgather_base(
         at::Tensor& outputbuffer,
         at::Tensor& inputbuffer,
         const AllgatherOptions& opts = AllgatherOptions());
+
+    c10::intrusive_ptr<Work> extended_alltoall_base(
+        at::Tensor& outputTensor,
+        at::Tensor& inputTensor,
+        std::vector<int64_t>& outputSplitSizes,
+        std::vector<int64_t>& inputSplitSizes,
+        const AllToAllOptions& opts = AllToAllOptions());
 
     // factory method to create an extended nccl process group
     static c10::intrusive_ptr<Backend> createExtProcessGroupNCCL(

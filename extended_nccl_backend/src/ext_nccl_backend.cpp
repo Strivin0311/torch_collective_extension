@@ -777,6 +777,7 @@ std::shared_ptr<ExtNCCLComm> ExtProcessGroupNCCL::initExtNCCLComm(
   int p2pRank,
   bool isSendRecvSelf
 ) {
+  printf("initExtNCCLComm for opType: %s\n", opTypeToString(opType).c_str());
   // Sanity check
   if (deviceKey.empty()) {
     C10_THROW_ERROR(
@@ -863,12 +864,17 @@ std::shared_ptr<ExtNCCLComm> ExtProcessGroupNCCL::initExtNCCLComm(
   options_->config.blocking = useNb ? 0 : 1;
   #endif
 
+  /** HACK: here we do not use ncclCommSplit to create a new communicator from the parent one
+   * since the options_->split_from is set as a NCCLComm ptr, instead of a ExtNCCLComm ptr,
+   * thus no consistent way to call ncclCommSplit.
+   * And skipping this step is safe, but only results in extra memory overhead for new ncclCommInitRank calls.
+   */
   #ifdef NCCL_HAS_COMM_SPLIT
-  // // Use split to create a new communicator only if:
-  // // 1. The parent comm is known; AND
-  // // 2. The new comm is not for a point-to-point operation.
-  // // ncclCommSplit() is a collective call, so it does not work for P2P
-  // // operations.
+  // Use split to create a new communicator only if:
+  // 1. The parent comm is known; AND
+  // 2. The new comm is not for a point-to-point operation.
+  // ncclCommSplit() is a collective call, so it does not work for P2P
+  // operations.
   // if (options_->split_from && !singleP2POp) {
   //   // Find a valid, healthy communicator to split from if possible.
   //   std::lock_guard<std::mutex> lock(options_->split_from->mutex_);
@@ -888,7 +894,7 @@ std::shared_ptr<ExtNCCLComm> ExtProcessGroupNCCL::initExtNCCLComm(
   //     }
   //   }
   // }
-  TORCH_CHECK(false, "ncclCommSplit is not supported in extended nccl backend")
+  TORCH_WARN("ncclCommSplit is not supported in extended nccl backend, since the options_->split_from is set as a NCCLComm ptr, instead of a ExtNCCLComm ptr.");
   #endif
 
   // To simplify conditional nesting, just create the ncclComms[i]
@@ -1026,6 +1032,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::ext_collective(
     bool avoidRecordStreams,
     bool nanCheck
 ) {
+  printf("ExtProcessGroupNCCL::ext_collective called with opType: %s\n", opTypeToString(opType).c_str());
   // Environment setting by the user may add onto collective call's option
   avoidRecordStreams |= avoidRecordStreams_;
   nanCheck &= enableNanCheck_;
@@ -1053,6 +1060,9 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::ext_collective(
     extNcclComm = initExtNCCLComm(key, device, opType);
   }
 
+  /** HACK: since we use ExtNCCLComm instead of NCCLComm
+   * here it's tricky to handle coloalescing due to possible conflicts with NCCLComm
+   */
   TORCH_CHECK(coalescing_state_ == 0, "ExtProcessGroupNCCL does not support coalescing");
   // if (coalescing_state_ & ExtCoalActive) {
   //   if ((coalescing_state_ & ExtCoalColl) == 0) {
@@ -1280,13 +1290,14 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_allgather_base(
   );
 }
 
-c10::intrusive_ptr<Work> ExtProcessGroupNCCL::alltoall_base(
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
   at::Tensor& outputTensor,
   at::Tensor& inputTensor,
   std::vector<int64_t>& outputSplitSizes,
   std::vector<int64_t>& inputSplitSizes,
   const AllToAllOptions& /* unused */
 ) {
+  printf("This is an extended alltoall_base that expects to do the same thing\n");
   check_gpu_single_tensor(outputTensor);
   check_gpu_single_tensor(inputTensor);
 
@@ -1485,7 +1496,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &ExtProcessGroupNCCL::_dummy_allgather_base,
         py::arg("output"),
         py::arg("input"),
-        py::arg("opts")
+        py::arg("opts"),
+        py::call_guard<py::gil_scoped_release>()
+      )
+      .def(
+        "extended_alltoall_base",
+        &ExtProcessGroupNCCL::extended_alltoall_base,
+        py::arg("output_tensor"),
+        py::arg("input_tensor"),
+        py::arg("output_split_sizes"),
+        py::arg("input_split_sizes"),
+        py::arg("opts") = ::c10d::AllToAllOptions(),
+        py::call_guard<py::gil_scoped_release>()
       )
       .def_property_readonly(
         "nccl_stream",
