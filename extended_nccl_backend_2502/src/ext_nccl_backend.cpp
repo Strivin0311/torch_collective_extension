@@ -1283,6 +1283,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_allgather_base(
   at::Tensor& inputbuffer,
   const AllgatherOptions& opts
 ) { // fake override
+  printf("ExtProcessGroupNCCL::_allgather_base, fake overrided from ProcessGroupNCCL\n");
   return ProcessGroupNCCL::_allgather_base(
       outputbuffer,
       inputbuffer,
@@ -1290,6 +1291,8 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_allgather_base(
   );
 }
 
+
+// new collective interfaces
 c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
   at::Tensor& outputTensor,
   at::Tensor& inputTensor,
@@ -1313,7 +1316,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
         inputTensor, // inputTensor
         outputTensor, // outputTensor
         rank_, // rank
-        "all_to_all", // collective name
+        "ext_all_to_all", // collective name
         inputTensor.numel(), // inNelems
         outputTensor.numel(), // outNelems
         inputTensor.scalar_type(), // dType
@@ -1347,7 +1350,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
         [](at::cuda::CUDAStream&,
             c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work) {},
         OpType::ALLTOALL_BASE,
-        "nccl:all_to_all"
+        "nccl:ext_all_to_all"
       );
   } else {
     c10d::checkSplitSizes(inputSplitSizes, inputTensor, size_);
@@ -1361,7 +1364,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
         inputTensor, // inputTensor
         outputTensor, // outputTensor
         rank_, // rank
-        "all_to_allv", // collective name
+        "ext_all_to_allv", // collective name
         inputTensor.numel(), // inNelems
         outputTensor.numel(), // outNelems
         inputTensor.scalar_type(), // dType
@@ -1412,13 +1415,12 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
         [](at::cuda::CUDAStream&,
             c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work) {},
         OpType::ALLTOALL_BASE,
-        "nccl:all_to_all"
+        "nccl:ext_all_to_all"
       );
   }
 }
 
 
-// new collective interfaces
 c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_dummy_allgather_base(
   at::Tensor& outputbuffer,
   at::Tensor& inputbuffer,
@@ -1459,6 +1461,7 @@ c10::intrusive_ptr<Backend> ExtProcessGroupNCCL::createExtProcessGroupNCCL(
   return c10::make_intrusive<ExtProcessGroupNCCL>(store, rank, size);
 }
 
+
 /** NOTE: `TORCH_EXTENSION_NAME` is an env var
  * that will be automatically translated to the extention module name defined in setup.py
  * e.g. since this module is named `ext_nccl_backend`
@@ -1497,7 +1500,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output"),
         py::arg("input"),
         py::arg("opts"),
-        py::call_guard<py::gil_scoped_release>()
+        py::call_guard<py::gil_scoped_release>(),
+        R"(A dummy allgather collective that sets output buffer to zero.
+        This is used for testing purposes only and does not perform any actual communication.)"
       )
       .def(
         "extended_alltoall_base",
@@ -1507,7 +1512,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output_split_sizes"),
         py::arg("input_split_sizes"),
         py::arg("opts") = ::c10d::AllToAllOptions(),
-        py::call_guard<py::gil_scoped_release>()
+        py::call_guard<py::gil_scoped_release>(),
+        R"(An extended all-to-all collective operation that used the self-modified extended collective interface.)"
       )
       .def_property_readonly(
         "nccl_stream",
