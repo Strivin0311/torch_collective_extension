@@ -14,6 +14,7 @@
 #include <torch/csrc/distributed/c10d/Utils.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 #include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
+#include <torch/csrc/cuda/nccl.h>
 
 /** NOTE: in this header file, pytorch defines a lot of type_caster 
  * to let pybind automatically convert between c++ and python types,
@@ -93,17 +94,63 @@ public:
         at::Tensor& inputbuffer,
         const AllgatherOptions& opts = AllgatherOptions());
 
-    template <typename Fn, typename PreProcess, typename PostProcess>
-    c10::intrusive_ptr<Work> ext_collective(
-        std::vector<at::Tensor>& inputs,
-        std::vector<at::Tensor>& outputs,
-        Fn fn,
-        PreProcess pre,
-        PostProcess post,
-        OpType opType,
-        const char* profilingTitle = nullptr,
-        bool avoidRecordStreams = false,
-        bool nanCheck = true);
+    // functor to call torch::cuda::nccl::all2all_single_equal_split
+    struct All2AllSingleEqualSplitFunctor {
+        int groupSize_;
+        explicit All2AllSingleEqualSplitFunctor(int size) : groupSize_(size) {}
+    
+        ncclResult_t operator()(
+            at::Tensor& input,
+            at::Tensor& output,
+            ncclComm_t comm,
+            at::cuda::CUDAStream& stream
+        ) const {
+            torch::cuda::nccl::all2all_single_equal_split(
+                input, output, groupSize_, comm, stream);
+            return ncclSuccess;
+        }
+    };
+
+    // functor to call torch::cuda::nccl::all2all_single_unequal_split
+    struct All2AllSingleUnequalSplitFunctor {
+        int groupSize_;
+        std::vector<int64_t>& outputSplitSizes;
+        std::vector<int64_t>& inputSplitSizes;
+        explicit All2AllSingleUnequalSplitFunctor(
+            int size, 
+            std::vector<int64_t>& outputSplitSizes,
+            std::vector<int64_t>& inputSplitSizes
+        ) : groupSize_(size), outputSplitSizes(outputSplitSizes), inputSplitSizes(inputSplitSizes) {}
+
+        ncclResult_t operator()(
+            at::Tensor& input,
+            at::Tensor& output,
+            ncclComm_t comm,
+            at::cuda::CUDAStream& stream
+        ) const {
+            std::vector<size_t> send_lengths(groupSize_);
+            std::vector<size_t> recv_lengths(groupSize_);
+            std::vector<size_t> send_offsets(groupSize_);
+            std::vector<size_t> recv_offsets(groupSize_);
+            c10d::computeLengthsAndOffsets(
+                inputSplitSizes, input, &send_lengths, &send_offsets);
+            c10d::computeLengthsAndOffsets(
+                outputSplitSizes, output, &recv_lengths, &recv_offsets);
+            // See [Sync Streams].
+            torch::cuda::nccl::all2all_single_unequal_split(
+                input.data_ptr(),
+                send_lengths.data(),
+                send_offsets.data(),
+                output.data_ptr(),
+                recv_lengths.data(),
+                recv_offsets.data(),
+                input.element_size(),
+                input.scalar_type(),
+                comm,
+                stream);
+            return ncclSuccess;
+        }
+    };
 
     // factory method to create an extended nccl process group
     static c10::intrusive_ptr<Backend> createExtProcessGroupNCCL(
@@ -133,6 +180,6 @@ public:
             "cuda" // supported devices: Optional[Union[str, List[str]]] = None, set to only cuda
         );
     }
+protected:
 };
-
 } // namespace c10d

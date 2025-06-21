@@ -1,5 +1,6 @@
 import os
 from typing import cast
+from itertools import chain
 
 import torch
 import torch.distributed as dist
@@ -7,7 +8,9 @@ import torch.distributed as dist
 import ext_nccl_backend
 from ext_nccl_backend import ExtProcessGroupNCCL
 from src import nvtx
-from src.ext_distributed_c10d import dummy_all_gather_into_tensor
+from src.ext_distributed_c10d import (
+    dummy_all_gather_into_tensor,
+)
 
 
 # init process group
@@ -22,23 +25,33 @@ world_size = int(os.environ["WORLD_SIZE"])
 torch.cuda.set_device(rank)
 device = torch.cuda.current_device()
 
+def print_rank(msg: str):
+    """Print the rank and message."""
+    rank = int(os.environ["LOCAL_RANK"])
+    print(f"[RANK {rank}] {msg}", flush=True)
+
 # just print the function name to see if it is loaded
-print(f"[RANK {rank}] {ext_nccl_backend.createExtProcessGroupNCCL=}")
+print_rank(f"{ext_nccl_backend.createExtProcessGroupNCCL=}")
+
+
+# --- init pg and backend --- #
 
 # get the process group backend
 world_group = dist.group.WORLD
-print(f"[RANK {rank}] WorldGroup: {type(world_group)=}", f"{world_group._get_backend_name()=}")
+print_rank(f"WorldGroup: {type(world_group)=}, {world_group._get_backend_name()=}")
+
 backend: dist.Backend = world_group._get_backend(torch.device(device))
-print(f"[RANK {rank}] WorldGroup: {type(backend)=}")
+print_rank(f"WorldGroup: {type(backend)=}")
 assert isinstance(backend, ExtProcessGroupNCCL), (
     f"expected ExtProcessGroupNCCL, got {type(backend)=}"
 )
 backend: ExtProcessGroupNCCL = cast(ExtProcessGroupNCCL, backend)
 
 pg = dist.new_group(list(range(world_size)), backend="ext_nccl_backend")
-print(f"[RANK {rank}] {type(pg)=}", f"{pg._get_backend_name()=}")
+print_rank(f"NewGroup: {type(pg)=}, {pg._get_backend_name()=}")
+
 pg_backend: dist.Backend = pg._get_backend(torch.device(device))
-print(f"[RANK {rank}] NewGroup: {type(pg_backend)=}")
+print_rank(f"NewGroup: {type(pg_backend)=}")
 assert isinstance(pg_backend, ExtProcessGroupNCCL), (
     f"expected ExtProcessGroupNCCL, got {type(pg_backend)=}"
 )
@@ -48,8 +61,19 @@ assert isinstance(pg_backend, ExtProcessGroupNCCL), (
 x = torch.zeros(world_size) + rank
 y = x.to(device)
 z = y.clone()
-p = torch.arange(world_size, device=device, dtype=torch.float32) + rank
+p = torch.arange(world_size, device=device, dtype=torch.float32) + rank * 2
 gp = torch.empty(world_size**2, device=device, dtype=torch.float32)
+
+q = torch.arange(world_size*2, device=device, dtype=torch.float32) + rank * 2
+aq = torch.empty(world_size*2, device=device, dtype=torch.float32)
+avq = torch.empty(
+    (3 * (world_size // 2)) 
+    if rank < world_size - 1 
+    else ((world_size + 3) * (world_size // 2)),
+    device=device, 
+    dtype=torch.float32
+)
+avq_ext = torch.empty_like(avq)
 
 
 # --- try simple functionalities --- #
@@ -57,38 +81,72 @@ gp = torch.empty(world_size**2, device=device, dtype=torch.float32)
 # NOTE: we cannot fetch the nccl stream at this point
 # since both the nccl stream and nccl comm are lazily initialized
 # until the first collective call
-# print(f"[RANK {rank}] {backend.nccl_stream=}")
+# print_rank(f"{backend.nccl_stream=}")
 
 # this goes through gloo backend
 dist.all_reduce(x, group=world_group)
 ans = world_size * (world_size - 1) // 2
-print(f"[RANK {rank}] cpu all-reduce for gloo backend: expected value: {ans=}, and actual value: {x=}") # the result should be [ans] * size
+print_rank(f"cpu all-reduce for gloo backend: expected value: {ans=}, and actual value: {x=}") # the result should be [ans] * size
 
 # this goes through nccl backend
+# and is expected to the same as nccl all-reduce
 dist.all_reduce(y, group=world_group)  # the result should be [ans] * size
-print(f"[RANK {rank}] cuda all-reduce for ext_nccl_backend: expected value: {ans=}, and actual value: {y=}")
+print_rank(f"cuda all-reduce for ext_nccl_backend: expected value: {ans=}, and actual value: {y=}")
 
+# this is expected to the same as nccl broadcast
 dist.broadcast(z, 0, group=pg) # the result should be [0] * size
-print(f"[RANK {rank}] cuda broadcast for ext_nccl_backend: expected value: 0, and actual value: {z=}")
+print_rank(f"cuda broadcast for ext_nccl_backend: expected value: 0, and actual value: {z=}")
 
+# this is expected to the same as nccl all-gather
 work = dist.all_gather_into_tensor(
-    gp,
-    p,
+    output_tensor=gp,
+    input_tensor=p,
     group=world_group,
     async_op=True,
 )
 work.wait()
-print(f"[RANK {rank}] cuda all-gather for ext_nccl_backend {p=} into {gp=}")
+print_rank(f"cuda all-gather for ext_nccl_backend {p=} into {gp=}")
 
+# this is expected to the same as nccl all-to-all
+work = dist.all_to_all_single(
+    output=aq,
+    input=q,
+    output_split_sizes=[2] * world_size,
+    input_split_sizes=[2] * world_size,
+    group=world_group,
+    async_op=True,
+)
+work.wait()
+print_rank(f"cuda all-to-all for ext_nccl_backend {q=} into {aq=}")
 
+# this is expected to the same as nccl all-to-all-v
+output_split_sizes = (
+    list(chain(*([[2,1]] * (world_size//2)))) if rank < world_size - 1 else list(chain(*([[2,world_size+1]] * (world_size//2))))
+)
+input_split_sizes = (
+    ([2] * world_size) if rank % 2 == 0 else ([1] * (world_size-1) + [world_size+1])
+)
+work = dist.all_to_all_single(
+    output=avq,
+    input=q,
+    output_split_sizes=output_split_sizes,
+    input_split_sizes=input_split_sizes,
+    group=world_group,
+    async_op=True,
+)
+work.wait()
+print_rank(f"cuda all-to-all-v for ext_nccl_backend {q=} into {avq=}")
+
+# this is expected to a dummy all-gather
+# that sets output to all zeros and print a message
 work = dummy_all_gather_into_tensor(
-    gp,
-    p,
+    output_tensor=gp,
+    input_tensor=p,
     group=backend,
     async_op=True,
 )
 work.wait()
-print(f"[RANK {rank}] cuda dummy all-gather for ext_nccl_backend {p=} into {gp=}")
+print_rank(f"cuda dummy all-gather for ext_nccl_backend {p=} into {gp=}")
 
 
 # --- try multi-stream --- #
