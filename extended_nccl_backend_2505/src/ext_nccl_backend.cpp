@@ -161,7 +161,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::alltoall_base(
       globalRankStart_, // globalRankStart_
       globalRankStride_, // globalRankStride_
       this->getSize() // worldSize
-    ); 
+    );
 
     // avoidRecordStreams_ note: collective() will stash inputTensors and
     // outputTensors.
