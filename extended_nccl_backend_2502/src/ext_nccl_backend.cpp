@@ -1291,8 +1291,107 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_allgather_base(
   );
 }
 
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::alltoall(
+  std::vector<at::Tensor>& outputTensors,
+  std::vector<at::Tensor>& inputTensors,
+  const AllToAllOptions& /* unused */
+) { // fake override
+  printf("This is an extended but fake overrided alltoall that expects to do the same thing\n");
+
+  std::vector<int64_t> inSplitSizes;
+  std::vector<int64_t> outSplitSizes;
+  int64_t total_numel = 0;
+
+  auto device = outputTensors[0].device();
+  for (const auto r : c10::irange(outputTensors.size())) {
+    check_gpu_single_tensor(outputTensors[r]);
+    check_gpu_single_tensor(inputTensors[r]);
+    TORCH_CHECK(
+        device == outputTensors[r].device() &&
+            device == inputTensors[r].device(),
+        "Tensors must be on the same device")
+    inSplitSizes.push_back(inputTensors[r].numel());
+    outSplitSizes.push_back(outputTensors[r].numel());
+    total_numel += inputTensors[r].numel();
+  }
+
+  RECORD_PARAM_COMMS_DATA(
+      std::make_tuple(
+          static_cast<int64_t>(seqCollective_) + 1,
+          false), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      inputTensors, // inputTensors
+      outputTensors, // outputTensors
+      rank_, // rank
+      "all_to_all", // collective name
+      total_numel, // inNelems
+      total_numel, // outNelems
+      inputTensors.front().scalar_type(), // dType
+      inSplitSizes, // inSplitSizes
+      outSplitSizes, // outSplitSizes
+      globalRankStart_, // globalRankStart
+      globalRankStride_, // globalRankStride
+      this->getSize() // worldSize
+  ); 
+
+  return ext_collective(
+      inputTensors,
+      outputTensors,
+      [&](at::Tensor& /* unused */,
+          at::Tensor& /* unused */,
+          ncclComm_t comm,
+          at::cuda::CUDAStream& stream) {
+        torch::cuda::nccl::all2all(outputTensors, inputTensors, comm, stream);
+        return ncclSuccess;
+      },
+      [&](at::cuda::CUDAStream&,
+          c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work) {
+        if (avoidRecordStreams_) {
+          // inputTensor0 and outputTensor0 are stashed redundantly by
+          // collective(), but that's ok.
+          auto& v = work->stashed_for_allocator_safety_;
+          v->insert(v->end(), inputTensors.begin(), inputTensors.end());
+          v->insert(v->end(), outputTensors.begin(), outputTensors.end());
+        }
+      },
+      [](at::cuda::CUDAStream&,
+        c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work) {},
+      OpType::ALLTOALL,
+      "nccl:ext_all_to_all"
+  );
+}
+
 
 // new collective interfaces
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_dummy_allgather_base(
+  at::Tensor& outputbuffer,
+  at::Tensor& inputbuffer,
+  const AllgatherOptions& opts
+) {
+  printf("This is a dummy _allgather_base that sets output buffer to zero\n");
+  outputbuffer.zero_();
+
+  auto inputs = std::vector<at::Tensor>{inputbuffer};
+  auto outputs = std::vector<at::Tensor>{outputbuffer};
+
+  auto device = getDevice();
+  int rank = getDeviceID();
+
+  auto work = initWork(
+      device,
+      rank,
+      OpType::ALLGATHER,
+      false, /*isP2P*/
+      "_allgather_base_dummy",
+      inputs,
+      outputs,
+      true /*record*/
+  );
+
+  return work; // ProcessGroupNCCL::WorkNCCL
+}
+
+
 c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
   at::Tensor& outputTensor,
   at::Tensor& inputTensor,
@@ -1418,35 +1517,6 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
         "nccl:ext_all_to_all"
       );
   }
-}
-
-
-c10::intrusive_ptr<Work> ExtProcessGroupNCCL::_dummy_allgather_base(
-  at::Tensor& outputbuffer,
-  at::Tensor& inputbuffer,
-  const AllgatherOptions& opts
-) {
-  printf("This is a dummy _allgather_base that sets output buffer to zero\n");
-  outputbuffer.zero_();
-
-  auto inputs = std::vector<at::Tensor>{inputbuffer};
-  auto outputs = std::vector<at::Tensor>{outputbuffer};
-
-  auto device = getDevice();
-  int rank = getDeviceID();
-
-  auto work = initWork(
-      device,
-      rank,
-      OpType::ALLGATHER,
-      false, /*isP2P*/
-      "_allgather_base_dummy",
-      inputs,
-      outputs,
-      true /*record*/
-  );
-
-  return work; // ProcessGroupNCCL::WorkNCCL
 }
 
 

@@ -287,6 +287,11 @@ public:
         at::Tensor& inputbuffer,
         const AllgatherOptions& opts = AllgatherOptions()) override;
 
+    c10::intrusive_ptr<Work> alltoall(
+        std::vector<at::Tensor>& outputTensors,
+        std::vector<at::Tensor>& inputTensors,
+        const AllToAllOptions& opts = AllToAllOptions()) override;
+
     // new collective interfaces
     c10::intrusive_ptr<Work> _dummy_allgather_base(
         at::Tensor& outputbuffer,

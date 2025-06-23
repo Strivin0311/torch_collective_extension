@@ -108,6 +108,16 @@ work = dist.all_gather_into_tensor(
 work.wait()
 print_rank(f"cuda all-gather for ext_nccl_backend {p=} into {gp=}")
 
+
+# this is expected to the same as nccl all-to-all for list of tensors
+input = torch.arange(4, device=device, dtype=torch.float32) + rank * 4
+input = list(input.chunk(4))
+output = list(torch.empty([4], device=device, dtype=torch.float32).chunk(4))
+work = dist.all_to_all(output, input, group=world_group, async_op=True)
+work.wait()
+print_rank(f"cuda all-to-all for ext_nccl_backend {input=} into {output=}")
+
+
 # this is expected to the same as nccl all-to-all
 work = dist.all_to_all_single(
     output=aq,
@@ -229,4 +239,5 @@ for iter in range(prof_iters):
         
 dist.barrier()
 torch.cuda.synchronize()
-dist.destroy_process_group()
+dist.destroy_process_group(group=pg)
+dist.destroy_process_group(group=world_group)
