@@ -11,6 +11,7 @@ from src import nvtx
 from src.ext_distributed_c10d import (
     dummy_all_gather_into_tensor,
     extended_all_to_all_single,
+    group_cast_collective,
 )
 
 
@@ -25,11 +26,12 @@ rank = int(os.environ["LOCAL_RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
 torch.cuda.set_device(rank)
 device = torch.cuda.current_device()
+dtype = torch.float32
 
 def print_rank(msg: str):
     """Print the rank and message."""
     rank = int(os.environ["LOCAL_RANK"])
-    print(f"[RANK {rank}] {msg}", flush=True)
+    print(f"\n[RANK {rank}] {msg}\n", flush=True)
 
 # just print the function name to see if it is loaded
 print_rank(f"{ext_nccl_backend.createExtProcessGroupNCCL=}")
@@ -75,6 +77,57 @@ avq = torch.empty(
     dtype=torch.float32
 )
 avq_ext = torch.empty_like(avq)
+
+nh, hd = 2, 3
+input_split_size_list_per_rank = [
+    [2, 1, 1], # r0
+    [1, 1, 2], # r1
+    [1, 1, 2], # r2
+    [1, 1, 2], # r3
+]
+dst_indices_list_per_rank = [
+    [[1], [1, 2], [2]], # r0
+    [[3], [0, 3], [2]], # r1
+    [[3], [0, 3], [1]], # r2
+    [[1], [0, 1], [2]], # r3
+]
+output_split_size_list_per_rank = [
+    [1, 1, 1], # r
+    [2, 2, 1, 1, 1], # r1 # BUG: [2, 2, 1, 2], # r1
+    [1, 1, 2, 2], # r2
+    [1, 1, 1, 1], # r3
+]
+src_index_list_per_rank = [
+    [1, 2, 3], # r0
+    [0, 2, 0, 3, 3], # r1 # BUG: [0, 2, 0, 3], # r1
+    [0, 0, 1, 3], # r2
+    [1, 1, 2, 2] # r3
+]
+
+input_split_size_list = input_split_size_list_per_rank[rank]
+output_split_size_list = output_split_size_list_per_rank[rank]
+dst_indices_list = dst_indices_list_per_rank[rank]
+src_index_list = src_index_list_per_rank[rank]
+
+expected_tensor_per_rank = [
+    torch.tensor([5, 9, 13], dtype=dtype, device=device),
+    torch.tensor([0, 1, 10, 11, 2, 12, 13], dtype=dtype, device=device),
+    torch.tensor([2, 3, 6, 7, 14, 15], dtype=dtype, device=device),
+    torch.tensor([4, 5, 8, 9], dtype=dtype, device=device),
+]
+input_tensor_per_rank = torch.tensor(
+    [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9, 10, 11],
+        [12, 13, 14, 15],
+    ],
+    dtype=dtype,
+    device=device,
+)
+input_tensor = input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+expected_tensor = expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+output_tensor = torch.empty_like(expected_tensor, dtype=dtype, device=device)
 
 
 # --- try simple functionalities --- #
@@ -173,6 +226,23 @@ work = extended_all_to_all_single(
 work.wait()
 print_rank(f"cuda extended all-to-all-v for ext_nccl_backend {q=} into {avq_ext=}")
 
+
+# this is expected to work as a group cast
+work = group_cast_collective(
+    input=input_tensor,
+    output=output_tensor,
+    input_split_size_list=input_split_size_list,
+    output_split_size_list=output_split_size_list,
+    dst_indices_list=dst_indices_list,
+    src_index_list=src_index_list,
+    group=backend,
+    async_op=True,
+)
+work.wait()
+assert torch.allclose(output_tensor, expected_tensor), (
+    f"output_tensor {output_tensor=} is not close to expected_tensor {expected_tensor=}"
+)
+print_rank(f"cuda group cast for ext_nccl_backend {input_tensor=} into {output_tensor=}, expected {expected_tensor=}")
 
 
 # --- try multi-stream --- #

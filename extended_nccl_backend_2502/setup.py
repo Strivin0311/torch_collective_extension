@@ -11,6 +11,7 @@ sources = [
     "src/ext_nccl_backend.cpp",
     "src/ext_nccl_comm.cpp",
     "src/ext_flight_recorder.cpp",
+    "src/group_collective.cpp",
 ]
 
 include_dirs = [

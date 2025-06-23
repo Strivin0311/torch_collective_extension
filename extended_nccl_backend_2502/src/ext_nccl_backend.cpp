@@ -104,44 +104,64 @@ namespace {
     }
   }
 
-  // Get a key string from device
-  inline std::string getKeyFromDevice(at::Device& device) {
-    return std::to_string(device.index());
-  }
 
-  inline void errorIfCapturingNonCapturableNCCL(c10::cuda::CaptureStatus status) {
-    // parentheses avoid some compiler warnings
-    static const uint64_t min_version =
-        (((uint64_t)2) << 32) + (((uint64_t)9) << 16) + ((uint64_t)6);
-    static const uint64_t cur_version = torch::cuda::nccl::version();
-    if (cur_version < min_version) {
-      TORCH_CHECK_WITH(
-          NotImplementedError,
-          status == c10::cuda::CaptureStatus::None,
-          "Capturing NCCL collectives is only allowed with NCCL >= 2.9.6");
+inline void convert_1d_vector(const std::vector<int64_t>& src, std::vector<size_t>& dst) {
+  dst.reserve(src.size());
+  for (auto val : src) {
+      dst.push_back(static_cast<size_t>(val));
+  }
+}
+
+inline void convert_2d_vector(const std::vector<std::vector<int64_t>>& src, std::vector<std::vector<size_t>>& dst) {
+  dst.reserve(src.size());
+  for (auto inner : src) {
+    std::vector<size_t> innerDst;
+    innerDst.reserve(inner.size());
+    for (auto val : inner) {
+      innerDst.push_back(static_cast<size_t>(val));
     }
+    dst.push_back(std::move(innerDst));
   }
+}
 
-  // Returns exception's what() given an exception_ptr instance.
-  std::string getExceptionMsgFromExceptionPtr(
-    const std::exception_ptr& exceptionPtr) {
-    TORCH_CHECK(exceptionPtr != nullptr);
-    try {
-      std::rethrow_exception(exceptionPtr);
-    } catch (const std::exception& e) {
-      return e.what();
-    } catch (...) {
-      return "Unknown exception type";
-    }
-  }
+// Get a key string from device
+inline std::string getKeyFromDevice(at::Device& device) {
+  return std::to_string(device.index());
+}
 
-  void syncStream(
-      at::Device& device,
-      at::cuda::CUDAEvent& ncclEvent,
-      at::cuda::CUDAStream& ncclStream) {
-    ncclEvent.record(at::cuda::getCurrentCUDAStream(device.index()));
-    ncclEvent.block(ncclStream);
+inline void errorIfCapturingNonCapturableNCCL(c10::cuda::CaptureStatus status) {
+  // parentheses avoid some compiler warnings
+  static const uint64_t min_version =
+      (((uint64_t)2) << 32) + (((uint64_t)9) << 16) + ((uint64_t)6);
+  static const uint64_t cur_version = torch::cuda::nccl::version();
+  if (cur_version < min_version) {
+    TORCH_CHECK_WITH(
+        NotImplementedError,
+        status == c10::cuda::CaptureStatus::None,
+        "Capturing NCCL collectives is only allowed with NCCL >= 2.9.6");
   }
+}
+
+// Returns exception's what() given an exception_ptr instance.
+std::string getExceptionMsgFromExceptionPtr(
+  const std::exception_ptr& exceptionPtr) {
+  TORCH_CHECK(exceptionPtr != nullptr);
+  try {
+    std::rethrow_exception(exceptionPtr);
+  } catch (const std::exception& e) {
+    return e.what();
+  } catch (...) {
+    return "Unknown exception type";
+  }
+}
+
+void syncStream(
+    at::Device& device,
+    at::cuda::CUDAEvent& ncclEvent,
+    at::cuda::CUDAStream& ncclStream) {
+  ncclEvent.record(at::cuda::getCurrentCUDAStream(device.index()));
+  ncclEvent.block(ncclStream);
+}
 
 } // anonymous namespace
 
@@ -1222,6 +1242,62 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::ext_collective(
   return work;  // ExtProcessGroupNCCL::ExtWorkNCCL
 }
 
+
+template <typename Fn, typename PreProcess, typename PostProcess>
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::ext_collective(
+    at::Tensor& input,
+    at::Tensor& output,
+    Fn fn,
+    PreProcess pre,
+    PostProcess post,
+    OpType opType,
+    const char* profilingTitle,
+    bool avoidRecordStreams,
+    bool nanCheck
+) {
+  auto inputs = std::vector<at::Tensor>{input};
+  auto outputs = std::vector<at::Tensor>{output};
+  return ext_collective(
+    inputs,
+    outputs,
+    fn,
+    pre,
+    post,
+    opType,
+    profilingTitle,
+    avoidRecordStreams,
+    nanCheck
+  );
+}
+
+
+template <typename Fn>
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::ext_collective(
+    at::Tensor& input,
+    at::Tensor& output,
+    Fn fn,
+    OpType opType,
+    const char* profilingTitle,
+    bool avoidRecordStreams,
+    bool nanCheck) {
+  auto inputs = std::vector<at::Tensor>{input};
+  auto outputs = std::vector<at::Tensor>{output};
+  return ext_collective(
+    inputs,
+    outputs,
+    fn,
+    [](at::cuda::CUDAStream&,
+      c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work) {},
+    [](at::cuda::CUDAStream&,
+        c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work) {},
+    opType,
+    profilingTitle,
+    avoidRecordStreams,
+    nanCheck
+  );
+}
+
+
 std::exception_ptr ExtProcessGroupNCCL::checkForNCCLErrorsInternal(
   std::shared_ptr<ExtNCCLComm>& extNcclComm
 ) {
@@ -1403,14 +1479,12 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
   check_gpu_single_tensor(outputTensor);
   check_gpu_single_tensor(inputTensor);
 
-  auto inputs = std::vector<at::Tensor>{inputTensor};
-  auto outputs = std::vector<at::Tensor>{outputTensor};
-
   if (outputSplitSizes.empty() && inputSplitSizes.empty()) {
     RECORD_PARAM_COMMS_DATA(
         std::make_tuple(
-            static_cast<int64_t>(seqCollective_) + 1,
-            false), // seq + 1 to match collective
+          static_cast<int64_t>(seqCollective_) + 1, // seq + 1 to match collective
+          false
+        ),
         std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
         inputTensor, // inputTensor
         outputTensor, // outputTensor
@@ -1426,11 +1500,10 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
         this->getSize() // worldSize
     );
 
-    // avoidRecordStreams_ note: collective() will stash inputTensors and
-    // outputTensors.
+    // avoidRecordStreams_ note: collective() will stash inputTensors and outputTensors.
     return ext_collective(
-        inputs,
-        outputs,
+        inputTensor,
+        outputTensor,
         [&](at::Tensor& input,
             at::Tensor& output,
             ncclComm_t comm,
@@ -1444,10 +1517,6 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
               input, output, this->getSize(), comm, stream);
           return ncclSuccess;
         },
-        [](at::cuda::CUDAStream&,
-          c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work) {},
-        [](at::cuda::CUDAStream&,
-            c10::intrusive_ptr<ExtProcessGroupNCCL::ExtWorkNCCL>& work) {},
         OpType::ALLTOALL_BASE,
         "nccl:ext_all_to_all"
       );
@@ -1456,33 +1525,34 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
     c10d::checkSplitSizes(outputSplitSizes, outputTensor, size_);
 
     RECORD_PARAM_COMMS_DATA(
-        std::make_tuple(
-            static_cast<int64_t>(seqCollective_) + 1,
-            false), // seq + 1 to match collective
-        std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-        inputTensor, // inputTensor
-        outputTensor, // outputTensor
-        rank_, // rank
-        "ext_all_to_allv", // collective name
-        inputTensor.numel(), // inNelems
-        outputTensor.numel(), // outNelems
-        inputTensor.scalar_type(), // dType
-        inputSplitSizes, // inSplitSizes
-        outputSplitSizes, // outSplitSizes
-        globalRankStart_, // globalRankStart
-        globalRankStride_, // globalRankStride
-        this->getSize() // worldSize
-      ); 
+      std::make_tuple(
+          static_cast<int64_t>(seqCollective_) + 1, // seq + 1 to match collective
+          false
+      ), 
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      inputTensor, // inputTensor
+      outputTensor, // outputTensor
+      rank_, // rank
+      "ext_all_to_allv", // collective name
+      inputTensor.numel(), // inNelems
+      outputTensor.numel(), // outNelems
+      inputTensor.scalar_type(), // dType
+      inputSplitSizes, // inSplitSizes
+      outputSplitSizes, // outSplitSizes
+      globalRankStart_, // globalRankStart
+      globalRankStride_, // globalRankStride
+      this->getSize() // worldSize
+    ); 
 
-    // avoidRecordStreams_ note: collective() will stash inputTensors and
-    // outputTensors.
+    // avoidRecordStreams_ note: collective() will stash inputTensors and outputTensors.
     return ext_collective(
-        inputs,
-        outputs,
+        inputTensor,
+        outputTensor,
         [&](at::Tensor& input,
             at::Tensor& output,
             ncclComm_t comm,
-            at::cuda::CUDAStream& stream) {
+            at::cuda::CUDAStream& stream
+        ) {
           std::vector<size_t> send_lengths(size_);
           std::vector<size_t> recv_lengths(size_);
           std::vector<size_t> send_offsets(size_);
@@ -1497,16 +1567,17 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
                 output.storage().data_ptr(), stream);
           }
           torch::cuda::nccl::all2all_single_unequal_split(
-              input.data_ptr(),
-              send_lengths.data(),
-              send_offsets.data(),
-              output.data_ptr(),
-              recv_lengths.data(),
-              recv_offsets.data(),
-              input.element_size(),
-              input.scalar_type(),
-              comm,
-              stream);
+            input.data_ptr(),
+            send_lengths.data(),
+            send_offsets.data(),
+            output.data_ptr(),
+            recv_lengths.data(),
+            recv_offsets.data(),
+            input.element_size(),
+            input.scalar_type(),
+            comm,
+            stream
+          );
           return ncclSuccess;
         },
         [](at::cuda::CUDAStream&,
@@ -1520,13 +1591,89 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::extended_alltoall_base(
 }
 
 
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_cast(
+  at::Tensor& inputTensor,
+  at::Tensor& outputTensor,
+  std::vector<int64_t>& inputSplitSizeList,
+  std::vector<int64_t>& outputSplitSizeList,
+  std::vector<std::vector<int64_t>>& dstIndicesList,
+  std::vector<int64_t>& srcIndexList
+  // const GroupCastOptions& /* unused */
+) {
+  check_gpu_single_tensor(outputTensor);
+  check_gpu_single_tensor(inputTensor);
+  TORCH_CHECK(
+    outputTensor.is_contiguous() && inputTensor.is_contiguous(),
+    "group_cast requires contiguous tensors for both input and output"
+  );
+
+  RECORD_PARAM_COMMS_DATA(
+    std::make_tuple(
+        static_cast<int64_t>(seqCollective_) + 1, // seq + 1 to match collective
+        false
+    ), 
+    std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+    inputTensor, // inputTensor
+    outputTensor, // outputTensor
+    rank_, // rank
+    "ext_all_to_allv", // collective name
+    inputTensor.numel(), // inNelems
+    outputTensor.numel(), // outNelems
+    inputTensor.scalar_type(), // dType
+    inputSplitSizeList, // inSplitSizes
+    outputSplitSizeList, // outSplitSizes
+    /** TODO: extend RECORD_PARAM_COMMS_DATA and ParamCommsDebugInfo to support:
+     * dstIndicesList
+     * srcIndexList
+     */
+    globalRankStart_, // globalRankStart
+    globalRankStride_, // globalRankStride
+    this->getSize() // worldSize
+  );
+
+  // avoidRecordStreams_ note: collective() will stash inputTensors and outputTensors.
+  return ext_collective(
+    inputTensor,
+    outputTensor,
+    [&](at::Tensor& input,
+        at::Tensor& output,
+        ncclComm_t comm,
+        at::cuda::CUDAStream& stream
+    ) {
+      // See [Sync Streams].
+      if (!avoidRecordStreams_) {
+        c10::cuda::CUDACachingAllocator::recordStream(
+          output.storage().data_ptr(), stream
+        );
+      }
+      torch::cuda::nccl::group_cast_nccl_kernel(
+          input.data_ptr(),
+          output.data_ptr(),
+          inputSplitSizeList,
+          outputSplitSizeList,
+          dstIndicesList,
+          srcIndexList,
+          input.stride(0),
+          input.element_size(),
+          input.scalar_type(),
+          comm,
+          stream
+      );
+      return ncclSuccess;
+    },
+    OpType::ALLTOALL_BASE,
+    "nccl:ext_all_to_all"
+  );
+}
+
+
 // factory method to create an extended nccl process group
 c10::intrusive_ptr<Backend> ExtProcessGroupNCCL::createExtProcessGroupNCCL(
-    const c10::intrusive_ptr<::c10d::Store>& store,
-    int rank,
-    int size,
-    const std::chrono::duration<float>& /* unused */
-  ) {
+  const c10::intrusive_ptr<::c10d::Store>& store,
+  int rank,
+  int size,
+  const std::chrono::duration<float>& /* unused */
+) {
   // return c10::make_intrusive<ExtProcessGroupNCCL>(rank, size);
   return c10::make_intrusive<ExtProcessGroupNCCL>(store, rank, size);
 }
@@ -1539,6 +1686,11 @@ c10::intrusive_ptr<Backend> ExtProcessGroupNCCL::createExtProcessGroupNCCL(
  * import ext_nccl_backend; print(ext_nccl_backend.createExtProcessGroupNCCL)
  */
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  /** NOTE:
+   * this factory method is used in ext_nccl_backend.hpp:static void ExtProcessGroupNCCLConstructor()
+   * to automatically create and register this backend to torch.distributed.Backend
+   * thus it needs to be be individually registered in advance here
+   */
   m.def("createExtProcessGroupNCCL", &ExtProcessGroupNCCL::createExtProcessGroupNCCL);
 
   auto torch_c10d = py::module::import("torch._C._distributed_c10d");
@@ -1584,6 +1736,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("opts") = ::c10d::AllToAllOptions(),
         py::call_guard<py::gil_scoped_release>(),
         R"(An extended all-to-all collective operation that used the self-modified extended collective interface.)"
+      )
+      .def(
+        "group_cast",
+        &ExtProcessGroupNCCL::group_cast,
+        py::arg("input_tensor"),
+        py::arg("output_tensor"),
+        py::arg("input_split_size_list"),
+        py::arg("output_split_size_list"),
+        py::arg("dst_indices_list"),
+        py::arg("src_index_list"),
+        // py::arg("opts") = ::c10d::GroupCastOptions(),
+        py::call_guard<py::gil_scoped_release>(),
+        R"(An nccl-based group cast collective operation that used the self-modified extended collective interface.)"
       )
       .def_property_readonly(
         "nccl_stream",

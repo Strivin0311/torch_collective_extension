@@ -31,9 +31,26 @@
 #include <pybind11/chrono.h>
 
 #include "ext_nccl_comm.hpp"
+#include "group_collective.hpp"
 
 
 namespace c10d {
+
+#define NCCLCHECK(cmd) do {                             \
+    ncclResult_t res = cmd;                             \
+    if (res != ncclSuccess) {                           \
+        printf(                                         \
+            "Failed, NCCL Error: %s:%d '%s'\n",         \
+            __FILE__, __LINE__, ncclGetErrorString(res) \
+        );                                              \
+        exit(EXIT_FAILURE);                             \
+    }                                                   \
+} while (0)
+
+struct GroupCastOptions {
+    std::chrono::milliseconds timeout = kUnsetTimeout;
+    bool asyncOp = true;
+};
 
 class TORCH_API ExtProcessGroupNCCL : public ProcessGroupNCCL {
 public:
@@ -305,6 +322,15 @@ public:
         std::vector<int64_t>& inputSplitSizes,
         const AllToAllOptions& opts = AllToAllOptions());
 
+    c10::intrusive_ptr<Work> group_cast(
+        at::Tensor& outputTensor,
+        at::Tensor& inputTensor,
+        std::vector<int64_t>& inputSplitSizeList,
+        std::vector<int64_t>& outputSplitSizeList,
+        std::vector<std::vector<int64_t>>& dstIndicesList,
+        std::vector<int64_t>& srcIndexList);
+        // const GroupCastOptions& opts = GroupCastOptions());
+
     // factory method to create an extended nccl process group
     static c10::intrusive_ptr<Backend> createExtProcessGroupNCCL(
         const c10::intrusive_ptr<::c10d::Store>& store,
@@ -345,6 +371,29 @@ protected:
 
     // The NCCL communicators currently in process of being initialized.
     std::unordered_map<std::string, std::shared_ptr<ExtNCCLComm>> inInitializationExtCommMap_;
+
+
+    template <typename Fn>
+    c10::intrusive_ptr<Work> ext_collective(
+        at::Tensor& input,
+        at::Tensor& output,
+        Fn fn,
+        OpType opType,
+        const char* profilingTitle = nullptr,
+        bool avoidRecordStreams = false,
+        bool nanCheck = true);
+
+    template <typename Fn, typename PreProcess, typename PostProcess>
+    c10::intrusive_ptr<Work> ext_collective(
+        at::Tensor& input,
+        at::Tensor& output,
+        Fn fn,
+        PreProcess pre,
+        PostProcess post,
+        OpType opType,
+        const char* profilingTitle = nullptr,
+        bool avoidRecordStreams = false,
+        bool nanCheck = true);
 
     template <typename Fn, typename PreProcess, typename PostProcess>
     c10::intrusive_ptr<Work> ext_collective(

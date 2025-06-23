@@ -1,8 +1,15 @@
+from datetime import timedelta
+
 import torch
 import torch.distributed as dist
 from torch._C._distributed_c10d import (
     AllgatherOptions
 )
+
+
+class GroupCastOptions:
+    timeout: timedelta
+    asyncOp: bool
 
 
 class ExtProcessGroupNCCL(dist.ProcessGroupNCCL):
@@ -31,4 +38,15 @@ class ExtProcessGroupNCCL(dist.ProcessGroupNCCL):
         output_split_sizes: list[int],
         input_split_sizes: list[int],
         opts=...,
+    ) -> dist.Work: ...
+    
+    def group_cast(
+        input: torch.Tensor,
+        output: torch.Tensor,
+        input_split_size_list: list[int],
+        output_split_size_list: list[int],
+        dst_indices_list: list[list[int]],
+        src_index_list: list[int],
+        opts=...,
+        **kwargs,
     ) -> dist.Work: ...
