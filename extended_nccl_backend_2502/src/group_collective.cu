@@ -166,4 +166,23 @@ namespace torch::cuda::nccl {
         // post-process reduce kernel from repeated_recv_buffer to recv_buffer
     }
 
+    std::vector<int64_t> compute_repeated_recv_buffer_shape(
+        const c10::IntArrayRef recv_buffer_shape,
+        const std::vector<int64_t>& output_split_size_list,
+        const std::vector<std::vector<int64_t>>& src_indices_list,
+        const int64_t dim
+    ) {
+        std::vector<int64_t> repeated_recv_buffer_shape(recv_buffer_shape.begin(), recv_buffer_shape.end());
+        int64_t num_output_splits = output_split_size_list.size();
+        for (int64_t output_split_idx = 0; output_split_idx < num_output_splits; ++output_split_idx) {
+            repeated_recv_buffer_shape[dim] += output_split_size_list[output_split_idx] * src_indices_list[output_split_idx].size();
+        }
+        /** NOTE: do not wrap it to c10::ArrayRef here as below:
+         *  return c10::makeArrayRef(repeated_recv_buffer_shape);
+         * since c10::ArrayRef only holds the reference which is local to this function
+         * thus might resulting in dangling reference
+         */
+        return repeated_recv_buffer_shape;
+    }
+
 } // namespace torch::cuda::nccl

@@ -416,7 +416,7 @@ for iter in range(prof_iters):
 
     with nvtx.add_nvtx_event("default_stream matmul"):
         e = a @ b
-        
+    
     dist.barrier()
     torch.cuda.synchronize()
         

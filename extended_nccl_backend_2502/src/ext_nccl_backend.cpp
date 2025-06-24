@@ -1727,7 +1727,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_cast(
       );
       return ncclSuccess;
     },
-    OpType::ALLTOALL_BASE,
+    OpType::ALLTOALL_BASE, /** FIXME: create and use OpType::GROUP_CAST instead */
     "nccl:group_cast"
   );
 }
@@ -1782,16 +1782,43 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
         ncclComm_t comm,
         at::cuda::CUDAStream& stream
     ) {
+      // allocate the repeated output buffer as the temporary recv buffer for group reduce
+      auto repeated_output_shape = c10::makeArrayRef(
+        torch::cuda::nccl::compute_repeated_recv_buffer_shape(
+          output.sizes(),
+          outputSplitSizeList,
+          srcIndicesList
+      ));
+      at::Tensor repeated_output = torch::empty(
+        repeated_output_shape,
+        /** NOTE: do not use `output.options()` here 
+         * since it might set requires_grad(true)
+         */
+        torch::dtype(output.scalar_type())
+        .device(output.device().type())
+        .layout(output.layout())
+      );
+
       // See [Sync Streams].
       if (!avoidRecordStreams_) {
         c10::cuda::CUDACachingAllocator::recordStream(
           output.storage().data_ptr(), stream
         );
       }
+      /** NOTE: we might need to record the repeated output for safety
+       * since it is allocated on the worker stream but only used in the nccl stream
+       * thus the caching allocator needs to know
+       * but it also causes the risk of higher cuda memory usage 
+       * due to delayed reuse of the storage for repeated output
+       */
+      c10::cuda::CUDACachingAllocator::recordStream(
+        repeated_output.storage().data_ptr(), stream
+      );
+
       torch::cuda::nccl::group_reduce_nccl_kernel(
           input.data_ptr(),
           output.data_ptr(),
-          output.data_ptr(), /** FIXME: this is a placeholder */
+          repeated_output.data_ptr(),
           inputSplitSizeList,
           outputSplitSizeList,
           dstIndexList,
@@ -1804,7 +1831,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
       );
       return ncclSuccess;
     },
-    OpType::ALLTOALL_BASE,
+    OpType::ALLTOALL_BASE, /** FIXME: create and use OpType::GROUP_CAST instead */
     "nccl:group_reduce"
   );
 }

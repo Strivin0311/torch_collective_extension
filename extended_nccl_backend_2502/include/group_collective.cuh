@@ -54,4 +54,12 @@ namespace torch::cuda::nccl {
         c10::ScalarType type,
         ncclComm_t comm,
         at::cuda::CUDAStream& stream);
+
+    std::vector<int64_t> compute_repeated_recv_buffer_shape(
+        const c10::IntArrayRef recv_buffer_shape,
+        const std::vector<int64_t>& output_split_size_list,
+        const std::vector<std::vector<int64_t>>& src_indices_list,
+        const int64_t dim = 0
+    );
+
 } // namespace torch::cuda::nccl
