@@ -12,6 +12,7 @@ from src.ext_distributed_c10d import (
     dummy_all_gather_into_tensor,
     extended_all_to_all_single,
     group_cast_collective,
+    group_reduce_collective,
 )
 
 
@@ -78,8 +79,31 @@ avq = torch.empty(
 )
 avq_ext = torch.empty_like(avq)
 
+
+# prepare for group cast
 nh, hd = 2, 3
-input_split_size_list_per_rank = [
+
+gc_input_tensor_per_rank = torch.tensor(
+    [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9, 10, 11],
+        [12, 13, 14, 15],
+    ],
+    dtype=dtype,
+    device=device,
+)
+gc_expected_tensor_per_rank = [
+    torch.tensor([5, 9, 13], dtype=dtype, device=device),
+    torch.tensor([0, 1, 10, 11, 2, 12, 13], dtype=dtype, device=device),
+    torch.tensor([2, 3, 6, 7, 14, 15], dtype=dtype, device=device),
+    torch.tensor([4, 5, 8, 9], dtype=dtype, device=device),
+]
+gc_input_tensor = gc_input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gc_expected_tensor = gc_expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gc_output_tensor = torch.empty_like(gc_expected_tensor, dtype=dtype, device=device)
+
+gc_input_split_size_list_per_rank = [
     [2, 1, 1], # r0
     [1, 1, 2], # r1
     [1, 1, 2], # r2
@@ -91,7 +115,7 @@ dst_indices_list_per_rank = [
     [[3], [0, 3], [1]], # r2
     [[1], [0, 1], [2]], # r3
 ]
-output_split_size_list_per_rank = [
+gc_output_split_size_list_per_rank = [
     [1, 1, 1], # r
     [2, 2, 1, 1, 1], # r1 # BUG: [2, 2, 1, 2], # r1
     [1, 1, 2, 2], # r2
@@ -103,31 +127,64 @@ src_index_list_per_rank = [
     [0, 0, 1, 3], # r2
     [1, 1, 2, 2] # r3
 ]
-
-input_split_size_list = input_split_size_list_per_rank[rank]
-output_split_size_list = output_split_size_list_per_rank[rank]
+gc_input_split_size_list = gc_input_split_size_list_per_rank[rank]
+gc_output_split_size_list = gc_output_split_size_list_per_rank[rank]
 dst_indices_list = dst_indices_list_per_rank[rank]
 src_index_list = src_index_list_per_rank[rank]
 
-expected_tensor_per_rank = [
-    torch.tensor([5, 9, 13], dtype=dtype, device=device),
-    torch.tensor([0, 1, 10, 11, 2, 12, 13], dtype=dtype, device=device),
-    torch.tensor([2, 3, 6, 7, 14, 15], dtype=dtype, device=device),
-    torch.tensor([4, 5, 8, 9], dtype=dtype, device=device),
+# prepare for group reduce
+gr_input_tensor_per_rank = [
+    torch.tensor([0, 1, 2, 3, 4], dtype=dtype, device=device),
+    torch.tensor([5, 6, 7, 8, 9, 10, 11], dtype=dtype, device=device),
+    torch.tensor([12, 13, 14, 15, 16], dtype=dtype, device=device),
+    torch.tensor([17, 18, 19, 20, 21], dtype=dtype, device=device),
 ]
-input_tensor_per_rank = torch.tensor(
-    [
-        [0, 1, 2, 3],
-        [4, 5, 6, 7],
-        [8, 9, 10, 11],
-        [12, 13, 14, 15],
-    ],
-    dtype=dtype,
-    device=device,
-)
-input_tensor = input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
-expected_tensor = expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
-output_tensor = torch.empty_like(expected_tensor, dtype=dtype, device=device)
+
+gr_output_tensor_per_rank = torch.tensor([
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+    [0, 0, 0, 0],
+], dtype=dtype, device=device)
+
+gr_expected_tensor_per_rank = torch.tensor([
+    [8, 10, 21, 19],
+    [17, 18, 13, 14],
+    [20, 22, 7, 8],
+    [10, 13, 15, 16],
+], dtype=dtype, device=device)
+gr_input_tensor = gr_input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gr_expected_tensor = gr_expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gr_output_tensor = gr_output_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+
+gr_input_split_size_list_per_rank = [
+    [1, 1, 1, 2], # r0
+    [2, 2, 1, 1, 1], # r1
+    [1, 2, 2], # r2
+    [2, 1, 2], # r3
+]
+dst_index_list_per_rank = [
+    [1, 2, 3, 0], # r0
+    [0, 2, 0, 3, 3], # r1
+    [0, 1, 3], # r2
+    [1, 0, 2], # r3
+]
+gr_output_split_size_list_per_rank = [
+    [2, 1, 1], # r0
+    [1, 1, 2], # r1
+    [1, 1, 2], # r2
+    [1, 1, 2], # r3
+]
+src_indices_list_per_rank = [
+    [[0, 1], [1, 2], [3]], # r0
+    [[3], [0, 3], [2]], # r1
+    [[3], [0, 3], [1]], # r2
+    [[1], [0, 1], [2]], # r3
+]
+gr_input_split_size_list = gr_input_split_size_list_per_rank[rank]
+gr_output_split_size_list = gr_output_split_size_list_per_rank[rank]
+dst_index_list = dst_index_list_per_rank[rank]
+src_indices_list = src_indices_list_per_rank[rank]
 
 
 # --- try simple functionalities --- #
@@ -229,20 +286,40 @@ print_rank(f"cuda extended all-to-all-v for ext_nccl_backend {q=} into {avq_ext=
 
 # this is expected to work as a group cast
 work = group_cast_collective(
-    input=input_tensor,
-    output=output_tensor,
-    input_split_size_list=input_split_size_list,
-    output_split_size_list=output_split_size_list,
+    input=gc_input_tensor,
+    output=gc_output_tensor,
+    input_split_size_list=gc_input_split_size_list,
+    output_split_size_list=gc_output_split_size_list,
     dst_indices_list=dst_indices_list,
     src_index_list=src_index_list,
     group=world_group,
     async_op=True,
 )
 work.wait()
-assert torch.allclose(output_tensor, expected_tensor), (
-    f"output_tensor {output_tensor=} is not close to expected_tensor {expected_tensor=}"
+assert torch.allclose(gc_output_tensor, gc_expected_tensor), (
+    f"output_tensor {gc_output_tensor=} is not close to expected_tensor {gc_expected_tensor=}"
 )
-print_rank(f"cuda group cast for ext_nccl_backend {input_tensor=} into {output_tensor=}, expected {expected_tensor=}")
+print_rank(f"cuda group cast for ext_nccl_backend {gc_input_tensor=} into {gc_output_tensor=}, expected {gc_expected_tensor=}")
+
+
+# this is expected to work as a group reduce
+if os.environ.get("TEST_GROUP_REDUCE", "0") == "1":
+    work = group_reduce_collective(
+        input=gr_input_tensor,
+        output=gr_output_tensor,
+        input_split_size_list=gr_input_split_size_list,
+        output_split_size_list=gr_output_split_size_list,
+        dst_index_list=dst_index_list,
+        src_indices_list=src_indices_list,
+        group=world_group,
+        async_op=True,
+    )
+    work.wait()
+    assert torch.allclose(gr_output_tensor, gr_expected_tensor), (
+        f"output_tensor {gr_output_tensor=} is not close to expected_tensor {gr_expected_tensor=}"
+    )
+    print_rank(f"cuda group reduce for ext_nccl_backend {gr_input_tensor=} into {gr_output_tensor=}, expected {gr_expected_tensor=}")
+
 
 
 # --- try multi-stream and profiling --- #
@@ -266,9 +343,14 @@ b = torch.randn(k, n, device=device)
 s = torch.randn((m,n), device=device, dtype=torch.float32)
 g = torch.empty((m*world_size, n), device=device, dtype=torch.float32)
 
-gc_inp = input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
-gc_out_exp = expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gc_inp = gc_input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gc_out_exp = gc_expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
 gc_out = torch.empty_like(gc_out_exp, dtype=dtype, device=device)
+
+gr_inp = gr_input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gr_out_exp = gr_expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gr_out = gr_output_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+
 
 profile_mode = os.environ.get("EXAMPLE_PROFILE_MODE", "0") == "1"
 if profile_mode:
@@ -311,13 +393,26 @@ for iter in range(prof_iters):
         gc_work = group_cast_collective(
             input=gc_inp,
             output=gc_out,
-            input_split_size_list=input_split_size_list,
-            output_split_size_list=output_split_size_list,
+            input_split_size_list=gc_input_split_size_list,
+            output_split_size_list=gc_output_split_size_list,
             dst_indices_list=dst_indices_list,
             src_index_list=src_index_list,
             group=world_group,
             async_op=True,
         )
+        
+    if os.environ.get("TEST_GROUP_REDUCE", "0") == "1":
+        with nvtx.add_nvtx_event("nccl stream group-reduce"):
+            gr_work = group_reduce_collective(
+                input=gr_inp,
+                output=gr_out,
+                input_split_size_list=gr_input_split_size_list,
+                output_split_size_list=gr_output_split_size_list,
+                dst_index_list=dst_index_list,
+                src_indices_list=src_indices_list,
+                group=world_group,
+                async_op=True,
+            )
 
     with nvtx.add_nvtx_event("default_stream matmul"):
         e = a @ b

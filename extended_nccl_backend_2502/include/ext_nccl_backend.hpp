@@ -52,6 +52,12 @@ struct GroupCastOptions {
     bool asyncOp = true;
 };
 
+struct GroupReduceOptions {
+    std::chrono::milliseconds timeout = kUnsetTimeout;
+    bool asyncOp = true;
+};
+
+
 class TORCH_API ExtProcessGroupNCCL : public ProcessGroupNCCL {
 public:
     // copied from WorkNCCL in torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp
@@ -335,6 +341,15 @@ public:
         std::vector<std::vector<int64_t>>& dstIndicesList,
         std::vector<int64_t>& srcIndexList);
         // const GroupCastOptions& opts = GroupCastOptions());
+
+    c10::intrusive_ptr<Work> group_reduce(
+        at::Tensor& outputTensor,
+        at::Tensor& inputTensor,
+        std::vector<int64_t>& inputSplitSizeList,
+        std::vector<int64_t>& outputSplitSizeList,
+        std::vector<int64_t>& dstIndexList,
+        std::vector<std::vector<int64_t>>& srcIndicesList);
+        // const GroupCastOptions& opts = GroupReduceOptions());
 
     // factory method to create an extended nccl process group
     static c10::intrusive_ptr<Backend> createExtProcessGroupNCCL(

@@ -15,6 +15,10 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 export EXAMPLE_PROFILE_MODE=0
 
+# FIXME: this is a workaround flag to turn off group reduce in the example
+# before it is ready to test
+export TEST_GROUP_REDUCE=0
+
 CMD="torchrun \
     --standalone \
     --nnode 1 \

@@ -1733,6 +1733,83 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_cast(
 }
 
 
+c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
+  at::Tensor& inputTensor,
+  at::Tensor& outputTensor,
+  std::vector<int64_t>& inputSplitSizeList,
+  std::vector<int64_t>& outputSplitSizeList,
+  std::vector<int64_t>& dstIndexList,
+  std::vector<std::vector<int64_t>>& srcIndicesList
+  // const GroupReduceOptions& /* unused */
+) {
+  check_gpu_single_tensor(outputTensor);
+  check_gpu_single_tensor(inputTensor);
+  TORCH_CHECK(
+    outputTensor.is_contiguous() && inputTensor.is_contiguous(),
+    "group_cast requires contiguous tensors for both input and output"
+  );
+
+  RECORD_PARAM_COMMS_DATA(
+    std::make_tuple(
+        static_cast<int64_t>(seqCollective_) + 1, // seq + 1 to match collective
+        false
+    ), 
+    std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+    inputTensor, // inputTensor
+    outputTensor, // outputTensor
+    rank_, // rank
+    "group_cast", // collective name
+    inputTensor.numel(), // inNelems
+    outputTensor.numel(), // outNelems
+    inputTensor.scalar_type(), // dType
+    inputSplitSizeList, // inSplitSizes
+    outputSplitSizeList, // outSplitSizes
+    /** TODO: extend RECORD_PARAM_COMMS_DATA and ParamCommsDebugInfo to support:
+     * dstIndexList
+     * srcIndicesList
+     */
+    globalRankStart_, // globalRankStart
+    globalRankStride_, // globalRankStride
+    this->getSize() // worldSize
+  );
+
+  // avoidRecordStreams_ note: collective() will stash inputTensors and outputTensors.
+  return ext_collective(
+    inputTensor,
+    outputTensor,
+    [&](at::Tensor& input,
+        at::Tensor& output,
+        ncclComm_t comm,
+        at::cuda::CUDAStream& stream
+    ) {
+      // See [Sync Streams].
+      if (!avoidRecordStreams_) {
+        c10::cuda::CUDACachingAllocator::recordStream(
+          output.storage().data_ptr(), stream
+        );
+      }
+      torch::cuda::nccl::group_reduce_nccl_kernel(
+          input.data_ptr(),
+          output.data_ptr(),
+          output.data_ptr(), /** FIXME: this is a placeholder */
+          inputSplitSizeList,
+          outputSplitSizeList,
+          dstIndexList,
+          srcIndicesList,
+          input.stride(0),
+          input.element_size(),
+          input.scalar_type(),
+          comm,
+          stream
+      );
+      return ncclSuccess;
+    },
+    OpType::ALLTOALL_BASE,
+    "nccl:group_reduce"
+  );
+}
+
+
 // factory method to create an extended nccl process group
 c10::intrusive_ptr<Backend> ExtProcessGroupNCCL::createExtProcessGroupNCCL(
   const c10::intrusive_ptr<::c10d::Store>& store,
@@ -1825,6 +1902,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         // py::arg("opts") = ::c10d::GroupCastOptions(),
         py::call_guard<py::gil_scoped_release>(),
         R"(An nccl-based group cast collective operation that used the self-modified extended collective interface.)"
+      )
+      .def(
+        "group_reduce",
+        &ExtProcessGroupNCCL::group_reduce,
+        py::arg("input_tensor"),
+        py::arg("output_tensor"),
+        py::arg("input_split_size_list"),
+        py::arg("output_split_size_list"),
+        py::arg("dst_index_list"),
+        py::arg("src_indices_list"),
+        // py::arg("opts") = ::c10d::GroupReduceOptions(),
+        py::call_guard<py::gil_scoped_release>(),
+        R"(An nccl-based group reduce collective operation that used the self-modified extended collective interface.)"
       )
       .def_property_readonly(
         "nccl_stream",

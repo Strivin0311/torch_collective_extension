@@ -4,6 +4,12 @@
 #define USE_NCCL
 #endif
 
+#include <ATen/Operators.h>
+#include <torch/all.h>
+#include <torch/library.h>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
 #include <nccl.h>
 #include <torch/csrc/cuda/nccl.h>
 
