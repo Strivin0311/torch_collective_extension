@@ -24,7 +24,7 @@ from ext_nccl_backend import ExtProcessGroupNCCL
 def dummy_all_gather_into_tensor(
     output_tensor: torch.Tensor, 
     input_tensor: torch.Tensor,
-    group: dist.Backend = None,
+    group: dist.ProcessGroup = None,
     async_op: bool = False,
 ):
     """
@@ -121,11 +121,12 @@ def dummy_all_gather_into_tensor(
         else:
             return None
 
-    assert isinstance(group, ExtProcessGroupNCCL), (
+    backend = group._get_backend(torch.device("cuda"))
+    assert isinstance(backend, ExtProcessGroupNCCL), (
         f"expected ExtProcessGroupNCCL, got {type(group)=}"
     )
     
-    work = group._dummy_allgather_base(output_tensor, input_tensor, opts)
+    work = backend._dummy_allgather_base(output_tensor, input_tensor, opts)
 
     if async_op:
         return work
@@ -254,11 +255,12 @@ def extended_all_to_all_single(
 
     group = group or _get_default_group()
     
-    assert isinstance(group, ExtProcessGroupNCCL), (
+    backend = group._get_backend(torch.device("cuda"))
+    assert isinstance(backend, ExtProcessGroupNCCL), (
         f"expected ExtProcessGroupNCCL, got {type(group)=}"
     )
     
-    work = group.extended_alltoall_base(
+    work = backend.extended_alltoall_base(
         output, input, output_split_sizes, input_split_sizes, opts
     )
 
@@ -384,11 +386,12 @@ def group_cast_collective(
 
     group = group or _get_default_group()
     
-    assert isinstance(group, ExtProcessGroupNCCL), (
+    backend = group._get_backend(torch.device("cuda"))
+    assert isinstance(backend, ExtProcessGroupNCCL), (
         f"expected ExtProcessGroupNCCL, got {type(group)=}"
     )
     
-    work = group.group_cast(
+    work = backend.group_cast(
         input,
         output,
         input_split_size_list,

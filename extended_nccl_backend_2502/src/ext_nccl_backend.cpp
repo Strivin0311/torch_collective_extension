@@ -636,8 +636,71 @@ ExtProcessGroupNCCL::ExtProcessGroupNCCL(
     }
 }
 
+
 // destructor
 ExtProcessGroupNCCL::~ExtProcessGroupNCCL() = default;
+
+
+void ExtProcessGroupNCCL::shutdown() {
+  printf("ExtProcessGroupNCCL::shutdown called, shutting down extended process group.\n");
+  ProcessGroupNCCL::shutdown();
+  ext_shutdown();
+}
+
+
+void ExtProcessGroupNCCL::ext_shutdown() {
+  LOG(INFO) << logPrefix_
+            << "Starting to destroy extended process group, flushing operations.";
+
+  // Flush all collectives
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& it : devExtNCCLCommMap_) {
+      auto& ncclComm = it.second;
+      ncclComm->finalize();
+    }
+  }
+
+  // Wait for all operations to complete.  If NCCL comm is non-blocking and
+  // timeout is reach, this will throw an exception.
+  for (auto& it : devExtNCCLCommMap_) {
+    auto& ncclComm = it.second;
+    // Use long interval to avoid acquiring CPU too frequently
+    ncclComm->waitReady(true);
+  }
+
+  /** NOTE: here we skip all operations related to watchdog
+   * since they are already set in the `shutdown()`
+   */
+  // Tell watchdog to (1) flush its queue and (2) do not use comm objects
+  // anymore because I am going to destroy them now
+  LOG(INFO) << logPrefix_ << "Operations flushed, joining watchdog thread.";
+  // terminateProcessGroup_.store(true);
+  // workMetaListCV_.notify_one();
+  // if (ncclCommWatchdogThread_.joinable()) {
+  //   ncclCommWatchdogThread_.join();
+  // }
+  // if (onCompletionHookThread_.joinable()) {
+  //   onCompletionHookThread_.join();
+  // }
+
+  // Watchdog thread exiting, retire heartbeat monitoring thread now to avoid
+  // false alarm
+  // terminateHeartbeatMonitorThread_.store(true);
+  // monitorWakeUpCV_.notify_one();
+
+  // Destroy the communicator, reclaim resources
+  LOG(INFO) << logPrefix_ << "Watchdog joined, destroying extended NCCL communicators.";
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& it : devExtNCCLCommMap_) {
+      auto& ncclComm = it.second;
+      ncclComm->destroy();
+    }
+  }
+
+  LOG(INFO) << logPrefix_ << "Destroy complete.";
+}
 
 
 void ExtProcessGroupNCCL::startCoalescing() {
@@ -658,15 +721,18 @@ void ExtProcessGroupNCCL::startCoalescing() {
   TORCH_CHECK(false, "ExtProcessGroupNCCL does not support coalescing");
 }
 
+
 // get the nccl cuda stream w.r.t. collective comm
 at::cuda::CUDAStream& ExtProcessGroupNCCL::getNCCLStream() {
   return ncclStreams_.at(getDeviceKey());
 }
 
+
 // get the torch nccl comm
 std::shared_ptr<c10d::NCCLComm> ExtProcessGroupNCCL::getTorchNCCLComm() {
   return devNCCLCommMap_.at(getDeviceKey());
 }
+
 
 // get the nccl comm ptr
 // int64_t ExtProcessGroupNCCL::getNCCLCommPtr() {
@@ -1716,6 +1782,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("size"),
           "Constructor to create ExtProcessGroupNCCL instance"
       )
+      .def(
+        /** NOTE: we need explicitly override the pybind of `_shutdown`,
+         * declaring self as an ExtProcessGroupNCCL instance
+         * since it is not a virtual method to be dynamically binded
+         * */
+        "_shutdown",
+        [](const c10::intrusive_ptr<::c10d::ExtProcessGroupNCCL>& self) {
+          return self->shutdown();
+        },
+        py::call_guard<py::gil_scoped_release>())
       .def(
         "_dummy_allgather_base",
         &ExtProcessGroupNCCL::_dummy_allgather_base,

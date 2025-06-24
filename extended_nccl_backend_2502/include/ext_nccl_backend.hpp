@@ -259,6 +259,11 @@ public:
     // destructor
     ~ExtProcessGroupNCCL() override;
 
+    // Destroy (shutdown) this backend -- normal exit.
+    void shutdown(); // override to append ext shutdown
+
+    void ext_shutdown(); // to destroy the extended nccl comm objects besides the original nccl comm
+
     void startCoalescing() override;
 
     // get the nccl cuda stream w.r.t. collective comm

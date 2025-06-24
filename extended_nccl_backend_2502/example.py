@@ -206,7 +206,7 @@ print_rank(f"cuda all-to-all-v for ext_nccl_backend {q=} into {avq=}")
 work = dummy_all_gather_into_tensor(
     output_tensor=gp,
     input_tensor=p,
-    group=backend,
+    group=world_group,
     async_op=True,
 )
 work.wait()
@@ -220,7 +220,7 @@ work = extended_all_to_all_single(
     input=q,
     output_split_sizes=output_split_sizes,
     input_split_sizes=input_split_sizes,
-    group=backend,
+    group=world_group,
     async_op=True,
 )
 work.wait()
@@ -235,7 +235,7 @@ work = group_cast_collective(
     output_split_size_list=output_split_size_list,
     dst_indices_list=dst_indices_list,
     src_index_list=src_index_list,
-    group=backend,
+    group=world_group,
     async_op=True,
 )
 work.wait()
@@ -245,7 +245,7 @@ assert torch.allclose(output_tensor, expected_tensor), (
 print_rank(f"cuda group cast for ext_nccl_backend {input_tensor=} into {output_tensor=}, expected {expected_tensor=}")
 
 
-# --- try multi-stream --- #
+# --- try multi-stream and profiling --- #
 
 dist.barrier()
 torch.cuda.synchronize()
@@ -257,10 +257,15 @@ nccl_stream = backend.nccl_stream
 print(f"[RANK {rank}] {nccl_stream=} | {nccl_stream.stream_id=} | {nccl_stream.device_index=} | {nccl_stream.device_type=}")
 
 m,n,k = 16384, 16384, 8192
+nh, hd = 1024, 2048
 a = torch.randn(m, k, device=device)
 b = torch.randn(k, n, device=device)
 s = torch.randn((m,n), device=device, dtype=torch.float32)
 g = torch.empty((m*world_size, n), device=device, dtype=torch.float32)
+
+gc_inp = input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gc_out_exp = expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gc_out = torch.empty_like(gc_out_exp, dtype=dtype, device=device)
 
 profile_mode = os.environ.get("EXAMPLE_PROFILE_MODE", "0") == "1"
 if profile_mode:
@@ -282,7 +287,7 @@ for iter in range(prof_iters):
     print(f"[RANK {rank}] iter {iter} {nccl_stream=} | {nccl_stream.stream_id=} | {nccl_stream.device_index=} | {nccl_stream.device_type=}")
     
     with nvtx.add_nvtx_event("nccl_stream allgather"):
-        work = dist.all_gather_into_tensor(
+        ag_work = dist.all_gather_into_tensor(
             g,
             s,
             group=world_group,
@@ -299,15 +304,25 @@ for iter in range(prof_iters):
         with torch.cuda.stream(nccl_stream):
                 d = a @ b
 
-    work.wait()
+    with nvtx.add_nvtx_event("nccl stream group-cast"):
+        gc_work = group_cast_collective(
+            input=gc_inp,
+            output=gc_out,
+            input_split_size_list=input_split_size_list,
+            output_split_size_list=output_split_size_list,
+            dst_indices_list=dst_indices_list,
+            src_index_list=src_index_list,
+            group=world_group,
+            async_op=True,
+        )
+
     with nvtx.add_nvtx_event("default_stream matmul"):
         e = a @ b
         
     dist.barrier()
     torch.cuda.synchronize()
         
-        
+
 dist.barrier()
 torch.cuda.synchronize()
-dist.destroy_process_group(group=pg)
-dist.destroy_process_group(group=world_group)
+dist.destroy_process_group()
