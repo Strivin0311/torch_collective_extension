@@ -123,6 +123,7 @@ namespace torch::cuda::nccl {
         auto nccl_data_type = to_nccl_data_type(type);
         auto nccl_comm = to_nccl_comm(comm);
 
+        // group-reduce kernel implemented by nccl group p2p
         int64_t input_offset = 0, output_offset = 0;
         NCCLCHECK(ncclGroupStart());
         for (size_t input_split_idx = 0; input_split_idx < num_input_splits; ++input_split_idx) {
@@ -162,7 +163,7 @@ namespace torch::cuda::nccl {
         }
         NCCLCHECK(ncclGroupEnd());
 
-        // post-process reduce from repeated_recv_buffer to recv_buffer
+        // post-process reduce kernel from repeated_recv_buffer to recv_buffer
     }
 
 } // namespace torch::cuda::nccl

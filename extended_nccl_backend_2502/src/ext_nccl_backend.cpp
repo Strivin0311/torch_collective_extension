@@ -1682,7 +1682,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_cast(
     inputTensor, // inputTensor
     outputTensor, // outputTensor
     rank_, // rank
-    "ext_all_to_allv", // collective name
+    "group_cast", // collective name
     inputTensor.numel(), // inNelems
     outputTensor.numel(), // outNelems
     inputTensor.scalar_type(), // dType
@@ -1728,7 +1728,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_cast(
       return ncclSuccess;
     },
     OpType::ALLTOALL_BASE,
-    "nccl:ext_all_to_all"
+    "nccl:group_cast"
   );
 }
 

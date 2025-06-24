@@ -26,7 +26,7 @@ rank = int(os.environ["LOCAL_RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
 torch.cuda.set_device(rank)
 device = torch.cuda.current_device()
-dtype = torch.float32
+dtype = torch.bfloat16
 
 def print_rank(msg: str):
     """Print the rank and message."""
@@ -256,8 +256,11 @@ print(f"[RANK {rank}] {side_stream=} | {side_stream.stream_id=} | {side_stream.d
 nccl_stream = backend.nccl_stream
 print(f"[RANK {rank}] {nccl_stream=} | {nccl_stream.stream_id=} | {nccl_stream.device_index=} | {nccl_stream.device_type=}")
 
-m,n,k = 16384, 16384, 8192
-nh, hd = 1024, 2048
+# init data shape
+# use large size for profiling to avoid cpu bound
+m, n, k = 16384, 16384, 8192
+nh, hd = m, n 
+
 a = torch.randn(m, k, device=device)
 b = torch.randn(k, n, device=device)
 s = torch.randn((m,n), device=device, dtype=torch.float32)
