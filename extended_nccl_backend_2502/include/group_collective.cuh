@@ -34,4 +34,18 @@ namespace torch::cuda::nccl {
         c10::ScalarType type,
         ncclComm_t comm,
         at::cuda::CUDAStream& stream);
+
+    TORCH_CUDA_CPP_API void group_reduce_nccl_kernel(
+        void* send_buffer,
+        void* recv_buffer,
+        void* repeated_recv_buffer,
+        const std::vector<int64_t>& input_split_size_list,
+        const std::vector<int64_t>& output_split_size_list,
+        const std::vector<int64_t>& dst_index_list,
+        const std::vector<std::vector<int64_t>>& src_indices_list,
+        size_t stride0,
+        size_t element_size,
+        c10::ScalarType type,
+        ncclComm_t comm,
+        at::cuda::CUDAStream& stream);
 } // namespace torch::cuda::nccl

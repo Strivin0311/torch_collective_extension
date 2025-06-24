@@ -31,7 +31,7 @@
 #include <pybind11/chrono.h>
 
 #include "ext_nccl_comm.hpp"
-#include "group_collective.hpp"
+#include "group_collective.cuh"
 
 
 namespace c10d {
