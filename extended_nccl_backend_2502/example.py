@@ -8,6 +8,10 @@ import torch.distributed as dist
 import ext_nccl_backend
 from ext_nccl_backend import ExtProcessGroupNCCL
 from src import nvtx
+from src.utils import (
+    sanity_check_for_group_cast_meta_args_per_rank,
+    sanity_check_for_group_reduce_meta_args_per_rank,
+)
 from src.ext_distributed_c10d import (
     dummy_all_gather_into_tensor,
     extended_all_to_all_single,
@@ -127,6 +131,14 @@ src_index_list_per_rank = [
     [0, 0, 1, 3], # r2
     [1, 1, 2, 2] # r3
 ]
+sanity_check_for_group_cast_meta_args_per_rank(
+    input_split_size_list_per_rank=gc_input_split_size_list_per_rank,
+    output_split_size_list_per_rank=gc_output_split_size_list_per_rank,
+    dst_indices_list_per_rank=dst_indices_list_per_rank,
+    src_index_list_per_rank=src_index_list_per_rank,
+    world_size=world_size,
+    check_nccl_send_recv=True,
+)
 gc_input_split_size_list = gc_input_split_size_list_per_rank[rank]
 gc_output_split_size_list = gc_output_split_size_list_per_rank[rank]
 dst_indices_list = dst_indices_list_per_rank[rank]
@@ -181,6 +193,14 @@ src_indices_list_per_rank = [
     [[3], [0, 3], [1]], # r2
     [[1], [0, 1], [2]], # r3
 ]
+sanity_check_for_group_reduce_meta_args_per_rank(
+    input_split_size_list_per_rank=gr_input_split_size_list_per_rank,
+    output_split_size_list_per_rank=gr_output_split_size_list_per_rank,
+    dst_index_list_per_rank=dst_index_list_per_rank,
+    src_indices_list_per_rank=src_indices_list_per_rank,
+    world_size=world_size,
+    check_nccl_send_recv=True,
+)
 gr_input_split_size_list = gr_input_split_size_list_per_rank[rank]
 gr_output_split_size_list = gr_output_split_size_list_per_rank[rank]
 dst_index_list = dst_index_list_per_rank[rank]
