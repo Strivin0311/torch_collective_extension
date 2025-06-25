@@ -170,14 +170,18 @@ namespace torch::cuda::nccl {
         const c10::IntArrayRef recv_buffer_shape,
         const std::vector<int64_t>& output_split_size_list,
         const std::vector<std::vector<int64_t>>& src_indices_list,
-        const int64_t dim
+        const int repeat_dim
     ) {
         std::vector<int64_t> repeated_recv_buffer_shape(recv_buffer_shape.begin(), recv_buffer_shape.end());
         int64_t num_output_splits = output_split_size_list.size();
+
+        int64_t repeat_dim_size = 0;
         for (int64_t output_split_idx = 0; output_split_idx < num_output_splits; ++output_split_idx) {
-            repeated_recv_buffer_shape[dim] += output_split_size_list[output_split_idx] * src_indices_list[output_split_idx].size();
+            repeat_dim_size += output_split_size_list[output_split_idx] * src_indices_list[output_split_idx].size();
         }
-        /** NOTE: do not wrap it to c10::ArrayRef here as below:
+        repeated_recv_buffer_shape[repeat_dim] = repeat_dim_size;
+
+        /** NOTE: do not wrap it to c10::ArrayRef:
          *  return c10::makeArrayRef(repeated_recv_buffer_shape);
          * since c10::ArrayRef only holds the reference which is local to this function
          * thus might resulting in dangling reference

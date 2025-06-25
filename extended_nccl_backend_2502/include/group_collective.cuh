@@ -59,7 +59,7 @@ namespace torch::cuda::nccl {
         const c10::IntArrayRef recv_buffer_shape,
         const std::vector<int64_t>& output_split_size_list,
         const std::vector<std::vector<int64_t>>& src_indices_list,
-        const int64_t dim = 0
+        const int repeat_dim = 0
     );
 
 } // namespace torch::cuda::nccl

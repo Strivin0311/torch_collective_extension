@@ -1783,12 +1783,11 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
         at::cuda::CUDAStream& stream
     ) {
       // allocate the repeated output buffer as the temporary recv buffer for group reduce
-      auto repeated_output_shape = c10::makeArrayRef(
-        torch::cuda::nccl::compute_repeated_recv_buffer_shape(
+      auto repeated_output_shape = torch::cuda::nccl::compute_repeated_recv_buffer_shape(
           output.sizes(),
           outputSplitSizeList,
           srcIndicesList
-      ));
+      );
       at::Tensor repeated_output = torch::empty(
         repeated_output_shape,
         /** NOTE: do not use `output.options()` here 

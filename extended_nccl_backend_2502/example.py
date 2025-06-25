@@ -117,13 +117,13 @@ dst_indices_list_per_rank = [
 ]
 gc_output_split_size_list_per_rank = [
     [1, 1, 1], # r
-    [2, 2, 1, 1, 1], # r1 # BUG: [2, 2, 1, 2], # r1
+    [2, 2, 1, 1, 1], # r1 => BUG: [2, 2, 1, 2], # r1
     [1, 1, 2, 2], # r2
     [1, 1, 1, 1], # r3
 ]
 src_index_list_per_rank = [
     [1, 2, 3], # r0
-    [0, 2, 0, 3, 3], # r1 # BUG: [0, 2, 0, 3], # r1
+    [0, 2, 0, 3, 3], # r1 => BUG: [0, 2, 0, 3], # r1
     [0, 0, 1, 3], # r2
     [1, 1, 2, 2] # r3
 ]
@@ -161,13 +161,13 @@ gr_input_split_size_list_per_rank = [
     [1, 1, 1, 2], # r0
     [2, 2, 1, 1, 1], # r1
     [1, 2, 2], # r2
-    [2, 1, 2], # r3
+    [1, 1, 1, 1, 1], # r3 => BUG: [2, 1, 2], # r3
 ]
 dst_index_list_per_rank = [
     [1, 2, 3, 0], # r0
     [0, 2, 0, 3, 3], # r1
     [0, 1, 3], # r2
-    [1, 0, 2], # r3
+    [1, 1, 0, 2, 2], # r3 => BUG: [1, 0, 2], # r3
 ]
 gr_output_split_size_list_per_rank = [
     [2, 1, 1], # r0
