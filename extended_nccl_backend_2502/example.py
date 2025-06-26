@@ -323,22 +323,21 @@ print_rank(f"cuda group cast for ext_nccl_backend {gc_input_tensor=} into {gc_ou
 
 
 # this is expected to work as a group reduce
-if os.environ.get("TEST_GROUP_REDUCE", "0") == "1":
-    work = group_reduce_collective(
-        input=gr_input_tensor,
-        output=gr_output_tensor,
-        input_split_size_list=gr_input_split_size_list,
-        output_split_size_list=gr_output_split_size_list,
-        dst_index_list=dst_index_list,
-        src_indices_list=src_indices_list,
-        group=world_group,
-        async_op=True,
-    )
-    work.wait()
-    assert torch.allclose(gr_output_tensor, gr_expected_tensor), (
-        f"output_tensor {gr_output_tensor=} is not close to expected_tensor {gr_expected_tensor=}"
-    )
-    print_rank(f"cuda group reduce for ext_nccl_backend {gr_input_tensor=} into {gr_output_tensor=}, expected {gr_expected_tensor=}")
+work = group_reduce_collective(
+    input=gr_input_tensor,
+    output=gr_output_tensor,
+    input_split_size_list=gr_input_split_size_list,
+    output_split_size_list=gr_output_split_size_list,
+    dst_index_list=dst_index_list,
+    src_indices_list=src_indices_list,
+    group=world_group,
+    async_op=True,
+)
+work.wait()
+assert torch.allclose(gr_output_tensor, gr_expected_tensor), (
+    f"output_tensor {gr_output_tensor=} is not close to expected_tensor {gr_expected_tensor=}"
+)
+print_rank(f"cuda group reduce for ext_nccl_backend {gr_input_tensor=} into {gr_output_tensor=}, expected {gr_expected_tensor=}")
 
 
 
@@ -420,19 +419,18 @@ for iter in range(prof_iters):
             group=world_group,
             async_op=True,
         )
-        
-    if os.environ.get("TEST_GROUP_REDUCE", "0") == "1":
-        with nvtx.add_nvtx_event("nccl stream group-reduce"):
-            gr_work = group_reduce_collective(
-                input=gr_inp,
-                output=gr_out,
-                input_split_size_list=gr_input_split_size_list,
-                output_split_size_list=gr_output_split_size_list,
-                dst_index_list=dst_index_list,
-                src_indices_list=src_indices_list,
-                group=world_group,
-                async_op=True,
-            )
+    
+    with nvtx.add_nvtx_event("nccl stream group-reduce"):
+        gr_work = group_reduce_collective(
+            input=gr_inp,
+            output=gr_out,
+            input_split_size_list=gr_input_split_size_list,
+            output_split_size_list=gr_output_split_size_list,
+            dst_index_list=dst_index_list,
+            src_indices_list=src_indices_list,
+            group=world_group,
+            async_op=True,
+        )
 
     with nvtx.add_nvtx_event("default_stream matmul"):
         e = a @ b

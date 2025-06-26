@@ -1782,14 +1782,16 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
         ncclComm_t comm,
         at::cuda::CUDAStream& stream
     ) {
-      // allocate the repeated output buffer as the temporary recv buffer for group reduce
-      auto repeated_output_shape = torch::cuda::nccl::compute_repeated_recv_buffer_shape(
+      // compute the group reduce meta info
+      auto meta_info = torch::cuda::nccl::compute_group_reduce_meta_info(
           output.sizes(),
           outputSplitSizeList,
           srcIndicesList
       );
+
+      // allocate the repeated output buffer as the temporary recv buffer
       at::Tensor repeated_output = torch::empty(
-        repeated_output_shape,
+        meta_info.repeated_recv_buffer_shape,
         /** NOTE: do not use `output.options()` here 
          * since it might set requires_grad(true)
          */
@@ -1798,12 +1800,31 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
         .layout(output.layout())
       );
 
-      // See [Sync Streams].
-      if (!avoidRecordStreams_) {
-        c10::cuda::CUDACachingAllocator::recordStream(
-          output.storage().data_ptr(), stream
-        );
-      }
+      // allocate meta args for post-process kernel
+      /** TODO: wrap the meta args into a single tensor 
+       * to minimize the overhead of both H2D copy and record stream
+       */
+      at::Tensor d_split_size_list = torch::tensor(
+        outputSplitSizeList,
+        torch::dtype(torch::kInt64)
+        .device(output.device().type())
+      );
+      at::Tensor d_num_repeats_list = torch::tensor(
+        meta_info.num_repeats_list,
+        torch::dtype(torch::kInt64)
+        .device(output.device().type())
+      );
+      at::Tensor d_cu_split_size_list = torch::tensor(
+        meta_info.cu_split_size_list,
+        torch::dtype(torch::kInt64)
+        .device(output.device().type())
+      );
+      at::Tensor d_repeated_cu_split_size_list = torch::tensor(
+        meta_info.repeated_cu_split_size_list,
+        torch::dtype(torch::kInt64)
+        .device(output.device().type())
+      );
+
       /** NOTE: we might need to record the repeated output for safety
        * since it is allocated on the worker stream but only used in the nccl stream
        * thus the caching allocator needs to know
@@ -1813,6 +1834,25 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
       c10::cuda::CUDACachingAllocator::recordStream(
         repeated_output.storage().data_ptr(), stream
       );
+      c10::cuda::CUDACachingAllocator::recordStream(
+        d_split_size_list.storage().data_ptr(), stream
+      );
+      c10::cuda::CUDACachingAllocator::recordStream(
+        d_num_repeats_list.storage().data_ptr(), stream
+      );
+      c10::cuda::CUDACachingAllocator::recordStream(
+        d_cu_split_size_list.storage().data_ptr(), stream
+      );
+      c10::cuda::CUDACachingAllocator::recordStream(
+        d_repeated_cu_split_size_list.storage().data_ptr(), stream
+      );
+
+      // See [Sync Streams].
+      if (!avoidRecordStreams_) {
+        c10::cuda::CUDACachingAllocator::recordStream(
+          output.storage().data_ptr(), stream
+        );
+      }
 
       torch::cuda::nccl::group_reduce_nccl_kernel(
           input.data_ptr(),
@@ -1826,7 +1866,14 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
           input.element_size(),
           input.scalar_type(),
           comm,
-          stream
+          stream,
+          /* for post-process kernel */
+          d_split_size_list.data_ptr<int64_t>(),
+          d_num_repeats_list.data_ptr<int64_t>(),
+          d_cu_split_size_list.data_ptr<int64_t>(),
+          d_repeated_cu_split_size_list.data_ptr<int64_t>(),
+          meta_info.seqlen,
+          meta_info.num_splits
       );
       return ncclSuccess;
     },

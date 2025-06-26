@@ -27,6 +27,29 @@ namespace torch::cuda::nccl {
         }                                                   \
     } while (0)
 
+    struct GroupReduceMetaInfo {
+        size_t seqlen;
+        size_t num_splits;
+        std::vector<int64_t> num_repeats_list;
+        std::vector<int64_t> cu_split_size_list;
+        std::vector<int64_t> repeated_cu_split_size_list;
+        std::vector<int64_t> repeated_recv_buffer_shape;
+        
+        GroupReduceMetaInfo(
+            size_t seqlen,
+            size_t num_splits, 
+            std::vector<int64_t> num_repeats_list,
+            std::vector<int64_t> cu_split_size_list,
+            std::vector<int64_t> repeated_cu_split_size_list,
+            std::vector<int64_t> repeated_recv_buffer_shape
+        ): 
+            seqlen(seqlen),
+            num_splits(num_splits),
+            num_repeats_list(std::move(num_repeats_list)),
+            cu_split_size_list(std::move(cu_split_size_list)),
+            repeated_cu_split_size_list(std::move(repeated_cu_split_size_list)),
+            repeated_recv_buffer_shape(std::move(repeated_recv_buffer_shape)) {}
+    };
 
     TORCH_CUDA_CPP_API void group_cast_nccl_kernel(
         void* send_buffer,
@@ -53,9 +76,16 @@ namespace torch::cuda::nccl {
         size_t element_size,
         c10::ScalarType type,
         ncclComm_t comm,
-        at::cuda::CUDAStream& stream);
+        at::cuda::CUDAStream& stream,
+        /* for post-process kernel */
+        const int64_t* d_split_size_list,
+        const int64_t* d_num_repeats_list,
+        const int64_t* d_cu_split_size_list,
+        const int64_t* d_repeated_cu_split_size_list,
+        size_t seqlen,
+        size_t num_splits);
 
-    std::vector<int64_t> compute_repeated_recv_buffer_shape(
+    GroupReduceMetaInfo compute_group_reduce_meta_info(
         const c10::IntArrayRef recv_buffer_shape,
         const std::vector<int64_t>& output_split_size_list,
         const std::vector<std::vector<int64_t>>& src_indices_list,

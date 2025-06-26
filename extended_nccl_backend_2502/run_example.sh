@@ -14,10 +14,8 @@ export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 export EXAMPLE_PROFILE_MODE=0
+export EXAMPLE_SANITIZER_MODE=0
 
-# FIXME: this is a workaround flag to turn off group reduce in the example
-# before it is ready to test
-export TEST_GROUP_REDUCE=0
 
 CMD="torchrun \
     --standalone \
@@ -34,6 +32,8 @@ if [[ $EXAMPLE_PROFILE_MODE == "1" ]]; then
         -o example.nsys-rep \
         --capture-range=cudaProfilerApi \
         $CMD > example.log 2>&1
+elif [[ $EXAMPLE_SANITIZER_MODE == "1" ]]; then
+    compute-sanitizer --tool memcheck $CMD > example.log 2>&1
 else
     $CMD > example.log 2>&1
 fi
