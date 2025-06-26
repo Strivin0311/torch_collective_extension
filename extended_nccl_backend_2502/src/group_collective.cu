@@ -49,8 +49,10 @@ ncclComm_t to_nccl_comm(torch::cuda::nccl::ncclComm_t var) {
 }
 
 
-#define GROUP_REDUCE_POST_PROCESS_NUM_SMS 10
+#define GROUP_REDUCE_POST_PROCESS_NUM_SMS 32 /* following nccl comm kernel, which consumes 32 SMs */
 #define GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE 1024
+
+// #define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION_0
 
 
 namespace torch::cuda::nccl {
@@ -60,12 +62,12 @@ namespace torch::cuda::nccl {
         size_t start,
         size_t end,
         size_t idx,
-        size_t stride0
+        size_t stride
     ) {
         size_t low = start, high = end;
         while (low < high) { // [low, high)
             size_t mid = low + (high - low) / 2;
-            if (idx < d_cu_split_size_list[mid] * stride0) {
+            if (idx < d_cu_split_size_list[mid] * stride) {
                 high = mid; // [low, mid)
             } else {
                 low = mid + 1; // [mid + 1, high)
@@ -74,6 +76,9 @@ namespace torch::cuda::nccl {
         return low - 1; // low == high
     }
 
+    /** NOTE: this version uses a single thread to process a single element
+     */
+    #ifdef GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION_0
     template <typename scalar_t>
     __global__ void group_reduce_nccl_post_process_kernel( // repeat-interleaved range reduce
         scalar_t* recv_buffer,
@@ -114,6 +119,8 @@ namespace torch::cuda::nccl {
 
             // reduce the recv data from the corr. position in repeated_recv_buffer
             const scalar_t* repeated_recv_data_ptr = (repeated_recv_buffer + repeated_recv_split_start + recv_split_offset_to_idx);
+
+            #pragma unroll (8)
             for (size_t r = 0; r < num_repeats; ++r) {
                 recv_reduce_data += *(repeated_recv_data_ptr + r * recv_split_size);
             }
@@ -122,6 +129,60 @@ namespace torch::cuda::nccl {
             *recv_data_ptr = recv_reduce_data;
         }
     }
+    #else
+    /** NOTE: this version uses a single thread to process a single row
+     */
+    template <typename scalar_t>
+    __global__ void group_reduce_nccl_post_process_kernel( // repeat-interleaved range reduce
+        scalar_t* recv_buffer,
+        const scalar_t* repeated_recv_buffer,
+        const int64_t* d_split_size_list,
+        const int64_t* d_num_repeats_list,
+        const int64_t* d_cu_split_size_list,
+        const int64_t* d_repeated_cu_split_size_list,
+        size_t seqlen,
+        size_t num_splits,
+        size_t stride0
+    ) {
+        size_t tid = blockDim.x * blockIdx.x + threadIdx.x;
+        size_t num_threads_per_grid = blockDim.x * gridDim.x;
+
+        size_t split_idx = 0;
+        for (auto row_idx = tid; row_idx < seqlen; row_idx += num_threads_per_grid) {
+            // search for split idx that the current idx belongs
+            split_idx = binary_search_split(
+                d_cu_split_size_list,
+                split_idx,
+                num_splits,
+                row_idx,
+                1
+            );
+
+            // get the info about this split
+            auto row_start = row_idx * stride0;
+            auto recv_split_start = d_cu_split_size_list[split_idx] * stride0;
+            auto recv_split_size = d_split_size_list[split_idx] * stride0;
+            auto repeated_recv_split_start = d_repeated_cu_split_size_list[split_idx] * stride0;
+            auto num_repeats = d_num_repeats_list[split_idx];
+            auto recv_split_offset_to_idx = row_start - recv_split_start;
+
+            // load the recv data with its ptr that the current idx needs to reduce to
+            scalar_t* recv_data_ptr = (recv_buffer + row_start);
+            scalar_t recv_reduce_data = *recv_data_ptr;
+
+            // reduce the recv data from the corr. position in repeated_recv_buffer
+            const scalar_t* repeated_recv_data_ptr = (repeated_recv_buffer + repeated_recv_split_start + recv_split_offset_to_idx);
+
+            #pragma unroll (8)
+            for (size_t r = 0; r < num_repeats; ++r) {
+                recv_reduce_data += *(repeated_recv_data_ptr + r * recv_split_size);
+            }
+
+            // write the reduced data back to recv_buffer
+            *recv_data_ptr = recv_reduce_data;
+        }
+    }
+    #endif
 
     GroupReduceMetaInfo compute_group_reduce_meta_info(
         const c10::IntArrayRef recv_buffer_shape,
@@ -286,6 +347,7 @@ namespace torch::cuda::nccl {
 
         // post-process reduce kernel from repeated_recv_buffer to recv_buffer
         dim3 gridDims(GROUP_REDUCE_POST_PROCESS_NUM_SMS); // we don't want the post-process kernel occupies too many SMs
+        // dim3 gridDims((seqlen * stride0 + GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE - 1) / GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
         dim3 blockDims(GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
 
         AT_DISPATCH_ALL_TYPES_AND2(
@@ -298,8 +360,8 @@ namespace torch::cuda::nccl {
                  * on the same stream as the group reduce kernel, i.e. nccl stream
                  */
                 <<<gridDims, blockDims, 0, stream.stream()>>>(
-                    (scalar_t*) recv_buffer,
-                    (scalar_t*) repeated_recv_buffer,
+                    static_cast<scalar_t*>(recv_buffer),
+                    static_cast<const scalar_t*>(repeated_recv_buffer),
                     d_split_size_list,
                     d_num_repeats_list,
                     d_cu_split_size_list,

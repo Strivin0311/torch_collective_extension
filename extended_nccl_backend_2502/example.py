@@ -355,20 +355,59 @@ print(f"[RANK {rank}] {nccl_stream=} | {nccl_stream.stream_id=} | {nccl_stream.d
 # init data shape
 # use large size for profiling to avoid cpu bound
 m, n, k = 16384, 16384, 8192
-nh, hd = m, n 
+# nh, hd = m, n
+nh, hd = 16, 128 # simulate 3 * 4k = 12k seqlen of kv
+sunit = 1024 # seqlen unit for "1" in the split_size_list, to simulate long seqlen
 
 a = torch.randn(m, k, device=device)
 b = torch.randn(k, n, device=device)
 s = torch.randn((m,n), device=device, dtype=torch.float32)
 g = torch.empty((m*world_size, n), device=device, dtype=torch.float32)
 
-gc_inp = gc_input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
-gc_out_exp = gc_expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gc_inp = gc_input_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).view(-1, nh, hd)
+gc_out_exp = gc_expected_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).view(-1, nh, hd)
 gc_out = torch.empty_like(gc_out_exp, dtype=dtype, device=device)
+gc_input_split_size_list = list(map(lambda x: x * sunit, gc_input_split_size_list))
+gc_output_split_size_list = list(map(lambda x: x * sunit, gc_output_split_size_list))
+print_rank(f"After seqlen simulation: {gc_input_split_size_list=} | {gc_output_split_size_list=}")
 
-gr_inp = gr_input_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
-gr_out_exp = gr_expected_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
-gr_out = gr_output_tensor_per_rank[rank].repeat_interleave(nh*hd).view(-1, nh, hd)
+gr_inp = gr_input_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).view(-1, nh, hd)
+gr_out_exp = gr_expected_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).view(-1, nh, hd)
+gr_out = gr_output_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).view(-1, nh, hd)
+gr_input_split_size_list = list(map(lambda x: x * sunit, gr_input_split_size_list))
+gr_output_split_size_list = list(map(lambda x: x * sunit, gr_output_split_size_list))
+print_rank(f"After seqlen simulation: {gr_input_split_size_list=} | {gr_output_split_size_list=}")
+
+
+work = group_cast_collective(
+    input=gc_inp,
+    output=gc_out,
+    input_split_size_list=gc_input_split_size_list,
+    output_split_size_list=gc_output_split_size_list,
+    dst_indices_list=dst_indices_list,
+    src_index_list=src_index_list,
+    group=world_group,
+    async_op=True,
+)
+work.wait()
+assert torch.allclose(gc_out, gc_out_exp), (
+    f"output_tensor {gc_out=} is not close to expected_tensor {gc_out_exp=}"
+)
+
+work = group_reduce_collective(
+    input=gr_inp,
+    output=gr_out,
+    input_split_size_list=gr_input_split_size_list,
+    output_split_size_list=gr_output_split_size_list,
+    dst_index_list=dst_index_list,
+    src_indices_list=src_indices_list,
+    group=world_group,
+    async_op=True,
+)
+work.wait()
+assert torch.allclose(gr_out, gr_out_exp), (
+    f"output_tensor {gr_out=} is not close to expected_tensor {gr_out_exp=}"
+)
 
 
 profile_mode = os.environ.get("EXAMPLE_PROFILE_MODE", "0") == "1"
