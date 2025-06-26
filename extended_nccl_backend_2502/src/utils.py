@@ -1,3 +1,4 @@
+import math
 from itertools import chain
 
 import torch
@@ -146,3 +147,22 @@ def sanity_check_for_group_reduce_meta_args_per_rank(
             world_size=world_size,
         )
 
+
+def get_group_reduce_post_process_bytes(
+    output_shape: list[int],
+    output_split_size_list: list[int],
+    src_indices_list: list[list[int]],
+    dtype: torch.dtype,
+) -> int:
+    seqlen = output_shape[0]
+    stride0 = math.prod(output_shape[1:])
+    repeated_seqlen = sum([
+        split_size * len(src_indices)
+        for split_size, src_indices in zip(output_split_size_list, src_indices_list)]
+    )
+    
+    num_loads = (seqlen + repeated_seqlen) * stride0
+    num_save = seqlen * stride0
+    
+    return (num_loads + num_save) * dtype.itemsize
+    

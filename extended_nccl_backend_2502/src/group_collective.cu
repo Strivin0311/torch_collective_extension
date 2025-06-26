@@ -52,7 +52,7 @@ ncclComm_t to_nccl_comm(torch::cuda::nccl::ncclComm_t var) {
 #define GROUP_REDUCE_POST_PROCESS_NUM_SMS 32 /* following nccl comm kernel, which consumes 32 SMs */
 #define GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE 1024
 
-// #define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION_0
+#define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION_0
 
 
 namespace torch::cuda::nccl {
@@ -161,25 +161,37 @@ namespace torch::cuda::nccl {
             // get the info about this split
             auto row_start = row_idx * stride0;
             auto recv_split_start = d_cu_split_size_list[split_idx] * stride0;
-            auto recv_split_size = d_split_size_list[split_idx] * stride0;
             auto repeated_recv_split_start = d_repeated_cu_split_size_list[split_idx] * stride0;
+            auto recv_split_size = d_split_size_list[split_idx] * stride0;
             auto num_repeats = d_num_repeats_list[split_idx];
             auto recv_split_offset_to_idx = row_start - recv_split_start;
 
-            // load the recv data with its ptr that the current idx needs to reduce to
+            // get the row start ptr of recv_buffer
             scalar_t* recv_data_ptr = (recv_buffer + row_start);
-            scalar_t recv_reduce_data = *recv_data_ptr;
 
-            // reduce the recv data from the corr. position in repeated_recv_buffer
+            // get the row start ptr of first partial split of repeated_recv_buffer
             const scalar_t* repeated_recv_data_ptr = (repeated_recv_buffer + repeated_recv_split_start + recv_split_offset_to_idx);
 
-            #pragma unroll (8)
-            for (size_t r = 0; r < num_repeats; ++r) {
-                recv_reduce_data += *(repeated_recv_data_ptr + r * recv_split_size);
-            }
+            // for-loop this row
+            for (auto col_idx = 0; col_idx < stride0; ++col_idx) {
+                // get the ptr of current col
+                auto recv_data_ptr_this_col = (recv_data_ptr + col_idx);
 
-            // write the reduced data back to recv_buffer
-            *recv_data_ptr = recv_reduce_data;
+                // load the original data of current col to be reduced to
+                scalar_t recv_reduce_data = *recv_data_ptr_this_col;
+
+                // get the corr ptr of first partial data
+                auto repeated_recv_data_ptr_this_col = (repeated_recv_data_ptr + col_idx);
+
+                // load and reduce each corr. partial data
+                #pragma unroll (8)
+                for (size_t r = 0; r < num_repeats; ++r) {
+                    recv_reduce_data += __ldg(repeated_recv_data_ptr_this_col + r * recv_split_size);
+                }
+             
+                // write the reduced data back to recv_buffer
+                *recv_data_ptr_this_col = recv_reduce_data;
+            }
         }
     }
     #endif
@@ -346,8 +358,12 @@ namespace torch::cuda::nccl {
         NCCLCHECK(ncclGroupEnd());
 
         // post-process reduce kernel from repeated_recv_buffer to recv_buffer
-        dim3 gridDims(GROUP_REDUCE_POST_PROCESS_NUM_SMS); // we don't want the post-process kernel occupies too many SMs
-        // dim3 gridDims((seqlen * stride0 + GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE - 1) / GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
+        /** NOTE: we don't want the post-process kernel occupies too many SMs
+         * thus we can not use the formula below to set grid size:
+         *      dim3 gridDims((seqlen * stride0 + GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE - 1) / GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
+         * but set a fixed grid size to the maximum number of SMs
+         */
+        dim3 gridDims(GROUP_REDUCE_POST_PROCESS_NUM_SMS);
         dim3 blockDims(GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
 
         AT_DISPATCH_ALL_TYPES_AND2(

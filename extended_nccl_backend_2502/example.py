@@ -8,15 +8,16 @@ import torch.distributed as dist
 import ext_nccl_backend
 from ext_nccl_backend import ExtProcessGroupNCCL
 from src import nvtx
-from src.utils import (
-    sanity_check_for_group_cast_meta_args_per_rank,
-    sanity_check_for_group_reduce_meta_args_per_rank,
-)
 from src.ext_distributed_c10d import (
     dummy_all_gather_into_tensor,
     extended_all_to_all_single,
     group_cast_collective,
     group_reduce_collective,
+)
+from src.utils import (
+    sanity_check_for_group_cast_meta_args_per_rank,
+    sanity_check_for_group_reduce_meta_args_per_rank,
+    get_group_reduce_post_process_bytes,
 )
 
 
@@ -369,14 +370,22 @@ gc_out_exp = gc_expected_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).vi
 gc_out = torch.empty_like(gc_out_exp, dtype=dtype, device=device)
 gc_input_split_size_list = list(map(lambda x: x * sunit, gc_input_split_size_list))
 gc_output_split_size_list = list(map(lambda x: x * sunit, gc_output_split_size_list))
-print_rank(f"After seqlen simulation: {gc_input_split_size_list=} | {gc_output_split_size_list=}")
+print_rank(f"For group cast, after seqlen simulation: {gc_input_split_size_list=} | {gc_output_split_size_list=}")
 
 gr_inp = gr_input_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).view(-1, nh, hd)
 gr_out_exp = gr_expected_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).view(-1, nh, hd)
 gr_out = gr_output_tensor_per_rank[rank].repeat_interleave(sunit*nh*hd).view(-1, nh, hd)
 gr_input_split_size_list = list(map(lambda x: x * sunit, gr_input_split_size_list))
 gr_output_split_size_list = list(map(lambda x: x * sunit, gr_output_split_size_list))
-print_rank(f"After seqlen simulation: {gr_input_split_size_list=} | {gr_output_split_size_list=}")
+
+gr_post_process_bytes = get_group_reduce_post_process_bytes(
+    output_shape=gr_out.shape,
+    output_split_size_list=gr_output_split_size_list,
+    src_indices_list=src_indices_list,
+    dtype=dtype,
+)
+
+print_rank(f"For group reduce, after seqlen simulation: {gr_input_split_size_list=} | {gr_output_split_size_list=} | {gr_post_process_bytes=}")
 
 
 work = group_cast_collective(
