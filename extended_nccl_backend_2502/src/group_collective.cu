@@ -49,10 +49,14 @@ ncclComm_t to_nccl_comm(torch::cuda::nccl::ncclComm_t var) {
 }
 
 
-#define GROUP_REDUCE_POST_PROCESS_NUM_SMS 32 /* following nccl comm kernel, which consumes 32 SMs */
-#define GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE 1024
+#define GROUP_REDUCE_POST_PROCESS_NUM_SMS 32 /* following nccl comm kernel, which consumes 32 SMs at most */
+#define GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE 1024 /* use the maximum block size */
 
-#define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION_0
+// #define GROUP_REDUCE_POST_PROCESS_TEST /* if set, no limit to grid size to test the highest HBM throughput */
+
+#define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION 0 // 0: per element per thread
+// #define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION 1 // 1: per row per thread
+// #define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION 2 // 2: per row per block
 
 
 namespace torch::cuda::nccl {
@@ -76,9 +80,11 @@ namespace torch::cuda::nccl {
         return low - 1; // low == high
     }
 
-    /** NOTE: this version uses a single thread to process a single element
-     */
-    #ifdef GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION_0
+    /** NOTE: this version uses each thread to process a single element 
+     * but the highest HBM throughput (no limit to grid size) only reachs ~25%
+     * TODO: optimize this kernel
+    */
+    #if GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION == 0
     template <typename scalar_t>
     __global__ void group_reduce_nccl_post_process_kernel( // repeat-interleaved range reduce
         scalar_t* recv_buffer,
@@ -129,9 +135,10 @@ namespace torch::cuda::nccl {
             *recv_data_ptr = recv_reduce_data;
         }
     }
-    #else
-    /** NOTE: this version uses a single thread to process a single row
-     */
+    #elif GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION == 1
+    /** NOTE: this version uses each thread to process a single row 
+     * but the highest HBM throughput (no limit to grid size) is too low, ~1%
+    */
     template <typename scalar_t>
     __global__ void group_reduce_nccl_post_process_kernel( // repeat-interleaved range reduce
         scalar_t* recv_buffer,
@@ -194,6 +201,72 @@ namespace torch::cuda::nccl {
             }
         }
     }
+    #elif GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION == 2
+    /** TODO: this version uses each block to process a single row */
+    template <typename scalar_t>
+    __global__ void group_reduce_nccl_post_process_kernel( // repeat-interleaved range reduce
+        scalar_t* recv_buffer,
+        const scalar_t* repeated_recv_buffer,
+        const int64_t* d_split_size_list,
+        const int64_t* d_num_repeats_list,
+        const int64_t* d_cu_split_size_list,
+        const int64_t* d_repeated_cu_split_size_list,
+        size_t seqlen,
+        size_t num_splits,
+        size_t stride0
+    ) {
+        size_t tid = blockDim.x * blockIdx.x + threadIdx.x;
+        size_t num_threads_per_grid = blockDim.x * gridDim.x;
+
+        size_t split_idx = 0;
+        for (auto row_idx = tid; row_idx < seqlen; row_idx += num_threads_per_grid) {
+            // search for split idx that the current idx belongs
+            split_idx = binary_search_split(
+                d_cu_split_size_list,
+                split_idx,
+                num_splits,
+                row_idx,
+                1
+            );
+
+            // get the info about this split
+            auto row_start = row_idx * stride0;
+            auto recv_split_start = d_cu_split_size_list[split_idx] * stride0;
+            auto repeated_recv_split_start = d_repeated_cu_split_size_list[split_idx] * stride0;
+            auto recv_split_size = d_split_size_list[split_idx] * stride0;
+            auto num_repeats = d_num_repeats_list[split_idx];
+            auto recv_split_offset_to_idx = row_start - recv_split_start;
+
+            // get the row start ptr of recv_buffer
+            scalar_t* recv_data_ptr = (recv_buffer + row_start);
+
+            // get the row start ptr of first partial split of repeated_recv_buffer
+            const scalar_t* repeated_recv_data_ptr = (repeated_recv_buffer + repeated_recv_split_start + recv_split_offset_to_idx);
+
+            // for-loop this row
+            for (auto col_idx = 0; col_idx < stride0; ++col_idx) {
+                // get the ptr of current col
+                auto recv_data_ptr_this_col = (recv_data_ptr + col_idx);
+
+                // load the original data of current col to be reduced to
+                scalar_t recv_reduce_data = *recv_data_ptr_this_col;
+
+                // get the corr ptr of first partial data
+                auto repeated_recv_data_ptr_this_col = (repeated_recv_data_ptr + col_idx);
+
+                // load and reduce each corr. partial data
+                #pragma unroll (8)
+                for (size_t r = 0; r < num_repeats; ++r) {
+                    recv_reduce_data += __ldg(repeated_recv_data_ptr_this_col + r * recv_split_size);
+                }
+             
+                // write the reduced data back to recv_buffer
+                *recv_data_ptr_this_col = recv_reduce_data;
+            }
+        }
+    }
+    #else
+    #error "Unsupported GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION"
     #endif
 
     GroupReduceMetaInfo compute_group_reduce_meta_info(
@@ -359,11 +432,13 @@ namespace torch::cuda::nccl {
 
         // post-process reduce kernel from repeated_recv_buffer to recv_buffer
         /** NOTE: we don't want the post-process kernel occupies too many SMs
-         * thus we can not use the formula below to set grid size:
-         *      dim3 gridDims((seqlen * stride0 + GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE - 1) / GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
-         * but set a fixed grid size to the maximum number of SMs
+         * thus we set a small fixed grid size, and only relax the limit when testing
          */
+        #ifdef GROUP_REDUCE_POST_PROCESS_TEST
+        dim3 gridDims((seqlen * stride0 + GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE - 1) / GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
+        #else
         dim3 gridDims(GROUP_REDUCE_POST_PROCESS_NUM_SMS);
+        #endif
         dim3 blockDims(GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
 
         AT_DISPATCH_ALL_TYPES_AND2(
