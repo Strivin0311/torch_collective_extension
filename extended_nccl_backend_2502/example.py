@@ -438,7 +438,7 @@ for iter in range(prof_iters):
     nccl_stream = backend.nccl_stream
     print(f"[RANK {rank}] iter {iter} {nccl_stream=} | {nccl_stream.stream_id=} | {nccl_stream.device_index=} | {nccl_stream.device_type=}")
     
-    with nvtx.add_nvtx_event("nccl_stream allgather"):
+    with nvtx.add_nvtx_event(f"rank{rank} nccl_stream allgather"):
         ag_work = dist.all_gather_into_tensor(
             g,
             s,
@@ -447,16 +447,16 @@ for iter in range(prof_iters):
         )
         
     side_stream.wait_stream(torch.cuda.default_stream())
-    with nvtx.add_nvtx_event("side_stream matmul"):
+    with nvtx.add_nvtx_event(f"rank{rank} side_stream matmul"):
         with torch.cuda.stream(side_stream):
             c = a @ b
     
     nccl_stream.wait_stream(torch.cuda.default_stream())
-    with nvtx.add_nvtx_event("nccl_stream matmul"):
+    with nvtx.add_nvtx_event(f"rank{rank} nccl_stream matmul"):
         with torch.cuda.stream(nccl_stream):
                 d = a @ b
 
-    with nvtx.add_nvtx_event("nccl stream group-cast"):
+    with nvtx.add_nvtx_event(f"rank{rank} nccl stream group-cast"):
         gc_work = group_cast_collective(
             input=gc_inp,
             output=gc_out,
@@ -468,7 +468,7 @@ for iter in range(prof_iters):
             async_op=True,
         )
     
-    with nvtx.add_nvtx_event("nccl stream group-reduce"):
+    with nvtx.add_nvtx_event(f"rank{rank} nccl stream group-reduce"):
         gr_work = group_reduce_collective(
             input=gr_inp,
             output=gr_out,
@@ -480,7 +480,7 @@ for iter in range(prof_iters):
             async_op=True,
         )
 
-    with nvtx.add_nvtx_event("default_stream matmul"):
+    with nvtx.add_nvtx_event(f"rank{rank} default_stream matmul"):
         e = a @ b
     
     dist.barrier()

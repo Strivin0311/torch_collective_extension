@@ -54,9 +54,9 @@ ncclComm_t to_nccl_comm(torch::cuda::nccl::ncclComm_t var) {
 
 // #define GROUP_REDUCE_POST_PROCESS_TEST /* if set, no limit to grid size to test the highest HBM throughput */
 
-#define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION 0 // 0: per element per thread
+// #define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION 0 // 0: per element per thread
 // #define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION 1 // 1: per row per thread
-// #define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION 2 // 2: per row per block
+#define GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION 2 // 2: per row per block
 
 
 namespace torch::cuda::nccl {
@@ -128,7 +128,7 @@ namespace torch::cuda::nccl {
 
             #pragma unroll (8)
             for (size_t r = 0; r < num_repeats; ++r) {
-                recv_reduce_data += *(repeated_recv_data_ptr + r * recv_split_size);
+                recv_reduce_data += __ldg(repeated_recv_data_ptr + r * recv_split_size);
             }
 
             // write the reduced data back to recv_buffer
@@ -202,7 +202,7 @@ namespace torch::cuda::nccl {
         }
     }
     #elif GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION == 2
-    /** TODO: this version uses each block to process a single row */
+    /** NOTE: this version uses each block to process a single row */
     template <typename scalar_t>
     __global__ void group_reduce_nccl_post_process_kernel( // repeat-interleaved range reduce
         scalar_t* recv_buffer,
@@ -215,27 +215,53 @@ namespace torch::cuda::nccl {
         size_t num_splits,
         size_t stride0
     ) {
-        size_t tid = blockDim.x * blockIdx.x + threadIdx.x;
-        size_t num_threads_per_grid = blockDim.x * gridDim.x;
+        extern __shared__ size_t shared_split_info[];
+
+        size_t bid = blockIdx.x, tid_in_block = threadIdx.x;
+        size_t num_blocks_per_grid = gridDim.x, num_threads_per_block = blockDim.x;
 
         size_t split_idx = 0;
-        for (auto row_idx = tid; row_idx < seqlen; row_idx += num_threads_per_grid) {
-            // search for split idx that the current idx belongs
-            split_idx = binary_search_split(
-                d_cu_split_size_list,
-                split_idx,
-                num_splits,
-                row_idx,
-                1
-            );
+        for (auto row_idx = bid; row_idx < seqlen; row_idx += num_blocks_per_grid) {
+            if (tid_in_block == 0) {
+                // only the thread 0 in this block searchs for split idx that the current idx belongs
+                split_idx = binary_search_split(
+                    d_cu_split_size_list,
+                    split_idx,
+                    num_splits,
+                    row_idx,
+                    1
+                );
+                // thread 0 gets the info about this split and writes it to shared memory
+                shared_split_info[0] = row_idx * stride0; // row_start
+                shared_split_info[1] = d_cu_split_size_list[split_idx] * stride0; // recv_split_start
+                shared_split_info[2] = d_repeated_cu_split_size_list[split_idx] * stride0; // repeated_recv_split_start
+                shared_split_info[3] = d_split_size_list[split_idx] * stride0; // recv_split_size
+                shared_split_info[4] = d_num_repeats_list[split_idx]; // num_repeats
+            } __syncthreads(); // all threads in this block wait for the same split info to be ready
 
             // get the info about this split
-            auto row_start = row_idx * stride0;
-            auto recv_split_start = d_cu_split_size_list[split_idx] * stride0;
-            auto repeated_recv_split_start = d_repeated_cu_split_size_list[split_idx] * stride0;
-            auto recv_split_size = d_split_size_list[split_idx] * stride0;
-            auto num_repeats = d_num_repeats_list[split_idx];
+            auto row_start = shared_split_info[0];
+            auto recv_split_start = shared_split_info[1];
+            auto repeated_recv_split_start = shared_split_info[2];
+            auto recv_split_size = shared_split_info[3];
+            auto num_repeats = shared_split_info[4];
             auto recv_split_offset_to_idx = row_start - recv_split_start;
+
+            // // search for split idx that the current idx belongs
+            // split_idx = binary_search_split(
+            //     d_cu_split_size_list,
+            //     split_idx,
+            //     num_splits,
+            //     row_idx,
+            //     1
+            // );
+
+            // auto row_start = row_idx * stride0;
+            // auto recv_split_start = d_cu_split_size_list[split_idx] * stride0;
+            // auto repeated_recv_split_start = d_repeated_cu_split_size_list[split_idx] * stride0;
+            // auto recv_split_size = d_split_size_list[split_idx] * stride0;
+            // auto num_repeats = d_num_repeats_list[split_idx];
+            // auto recv_split_offset_to_idx = row_start - recv_split_start;
 
             // get the row start ptr of recv_buffer
             scalar_t* recv_data_ptr = (recv_buffer + row_start);
@@ -244,7 +270,7 @@ namespace torch::cuda::nccl {
             const scalar_t* repeated_recv_data_ptr = (repeated_recv_buffer + repeated_recv_split_start + recv_split_offset_to_idx);
 
             // for-loop this row
-            for (auto col_idx = 0; col_idx < stride0; ++col_idx) {
+            for (auto col_idx = tid_in_block; col_idx < stride0; col_idx += num_threads_per_block) {
                 // get the ptr of current col
                 auto recv_data_ptr_this_col = (recv_data_ptr + col_idx);
 
@@ -441,16 +467,30 @@ namespace torch::cuda::nccl {
         #endif
         dim3 blockDims(GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE);
 
+        #if GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION == 2
+        size_t sharedMemSize = 5 * sizeof(size_t);
+        #else
+        size_t sharedMemSize = 0;
+        #endif
+
         AT_DISPATCH_ALL_TYPES_AND2(
             at::ScalarType::Half, at::ScalarType::BFloat16, /* add float16/bfloat16 to dispatch types */
             type,
-            "group_reduce_nccl_post_process_kernel",
+            #if GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION == 0
+            "group_reduce_nccl_post_process_kernel_v0",
+            #elif GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION == 1
+            "group_reduce_nccl_post_process_kernel_v1",
+            #elif GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION == 2
+            "group_reduce_nccl_post_process_kernel_v2",
+            #else
+            #error "Unsupported GROUP_REDUCE_POST_PROCESS_KERNEL_VERSION"
+            #endif
             [&] {
             group_reduce_nccl_post_process_kernel<scalar_t> /* auto-deduced `scalar_t` by the macro */
                 /** NOTE: the post-process kernel is supposed to run 
                  * on the same stream as the group reduce kernel, i.e. nccl stream
                  */
-                <<<gridDims, blockDims, 0, stream.stream()>>>(
+                <<<gridDims, blockDims, sharedMemSize, stream.stream()>>>(
                     static_cast<scalar_t*>(recv_buffer),
                     static_cast<const scalar_t*>(repeated_recv_buffer),
                     d_split_size_list,
