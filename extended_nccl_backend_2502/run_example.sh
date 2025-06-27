@@ -15,6 +15,7 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 export EXAMPLE_PROFILE_MODE=0
 export EXAMPLE_SANITIZER_MODE=0
+export EXAMPLE_USE_NCU_PROFILE_MODE=0
 
 
 CMD="torchrun \
@@ -27,11 +28,20 @@ CMD="torchrun \
 "
 
 if [[ $EXAMPLE_PROFILE_MODE == "1" ]]; then
-    nsys profile \
-        --force-overwrite true \
-        -o example.nsys-rep \
-        --capture-range=cudaProfilerApi \
-        $CMD > example.log 2>&1
+    if [[ $EXAMPLE_USE_NCU_PROFILE_MODE == "1" ]]; then
+        ncu \
+            --target-processes all \
+            --set full \
+            --kernel-name regex:".*group_reduce*" \
+            -f -o example.ncu-rep \
+            $CMD > example.log 2>&1
+    else
+        nsys profile \
+            --force-overwrite true \
+            -o example.nsys-rep \
+            --capture-range=cudaProfilerApi \
+            $CMD > example.log 2>&1
+    fi
 elif [[ $EXAMPLE_SANITIZER_MODE == "1" ]]; then
     compute-sanitizer --tool memcheck $CMD > example.log 2>&1
 else
