@@ -13,9 +13,9 @@ export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
-export EXAMPLE_PROFILE_MODE=0
+export EXAMPLE_PROFILE_MODE=1
+export EXAMPLE_USE_NCU_FOR_PROFILE=1
 export EXAMPLE_SANITIZER_MODE=0
-export EXAMPLE_USE_NCU_PROFILE_MODE=0
 
 
 CMD="torchrun \
@@ -28,7 +28,7 @@ CMD="torchrun \
 "
 
 if [[ $EXAMPLE_PROFILE_MODE == "1" ]]; then
-    if [[ $EXAMPLE_USE_NCU_PROFILE_MODE == "1" ]]; then
+    if [[ $EXAMPLE_USE_NCU_FOR_PROFILE == "1" ]]; then
         ncu \
             --target-processes all \
             --set full \

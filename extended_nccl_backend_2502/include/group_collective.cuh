@@ -30,6 +30,8 @@ namespace torch::cuda::nccl {
     struct GroupReduceMetaInfo {
         size_t seqlen;
         size_t num_splits;
+        size_t repeat_dim_size;
+        size_t max_split_size;
         std::vector<int64_t> num_repeats_list;
         std::vector<int64_t> cu_split_size_list;
         std::vector<int64_t> repeated_cu_split_size_list;
@@ -38,6 +40,8 @@ namespace torch::cuda::nccl {
         GroupReduceMetaInfo(
             size_t seqlen,
             size_t num_splits, 
+            size_t repeat_dim_size,
+            size_t max_split_size,
             std::vector<int64_t> num_repeats_list,
             std::vector<int64_t> cu_split_size_list,
             std::vector<int64_t> repeated_cu_split_size_list,
@@ -45,6 +49,8 @@ namespace torch::cuda::nccl {
         ): 
             seqlen(seqlen),
             num_splits(num_splits),
+            repeat_dim_size(repeat_dim_size),
+            max_split_size(max_split_size),
             num_repeats_list(std::move(num_repeats_list)),
             cu_split_size_list(std::move(cu_split_size_list)),
             repeated_cu_split_size_list(std::move(repeated_cu_split_size_list)),
@@ -83,7 +89,9 @@ namespace torch::cuda::nccl {
         const int64_t* d_cu_split_size_list,
         const int64_t* d_repeated_cu_split_size_list,
         size_t seqlen,
-        size_t num_splits);
+        size_t seqlen_r,
+        size_t num_splits,
+        size_t max_split_size);
 
     GroupReduceMetaInfo compute_group_reduce_meta_info(
         const c10::IntArrayRef recv_buffer_shape,

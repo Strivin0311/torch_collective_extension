@@ -1873,7 +1873,9 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
           d_cu_split_size_list.data_ptr<int64_t>(),
           d_repeated_cu_split_size_list.data_ptr<int64_t>(),
           meta_info.seqlen,
-          meta_info.num_splits
+          meta_info.repeat_dim_size,
+          meta_info.num_splits,
+          meta_info.max_split_size
       );
       return ncclSuccess;
     },

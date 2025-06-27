@@ -16,6 +16,7 @@ sources = [
 
 include_dirs = [
     f"{os.path.dirname(os.path.abspath(__file__))}/include/",
+    "/home/littsk/kato/workspace/attn-library/magiattn/magi_attention/csrc/cutlass/include/,"
 ]
 
 # torch include and source
@@ -35,10 +36,10 @@ if torch.cuda.is_available():
         # library_dirs=library_dirs,
         # libraries=libraries,
         # extra_link_args=extra_link_args,
-        # extra_compile_args={
-        #     'cxx': ['-std=c++17', '-fPIC'],
-        #     'nvcc': ['-std=c++17', '-Xcompiler', '-fPIC']
-        # }
+        extra_compile_args={
+            # 'cxx': ['-std=c++17', '-fPIC'],
+            'nvcc': ['-lineinfo']
+        }
     )
 else:
     module = cpp_extension.CppExtension(

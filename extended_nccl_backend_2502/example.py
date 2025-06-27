@@ -20,6 +20,9 @@ from src.utils import (
     get_group_reduce_post_process_bytes,
 )
 
+# get some env variable as flags
+profile_mode = os.environ.get("EXAMPLE_PROFILE_MODE", "0") == "1"
+use_ncu_for_profile = os.environ.get("EXAMPLE_USE_NCU_FOR_PROFILE", "0") == "1"
 
 # init process group
 dist.init_process_group(
@@ -324,22 +327,22 @@ print_rank(f"cuda group cast for ext_nccl_backend {gc_input_tensor=} into {gc_ou
 
 
 # this is expected to work as a group reduce
-work = group_reduce_collective(
-    input=gr_input_tensor,
-    output=gr_output_tensor,
-    input_split_size_list=gr_input_split_size_list,
-    output_split_size_list=gr_output_split_size_list,
-    dst_index_list=dst_index_list,
-    src_indices_list=src_indices_list,
-    group=world_group,
-    async_op=True,
-)
-work.wait()
-assert torch.allclose(gr_output_tensor, gr_expected_tensor), (
-    f"output_tensor {gr_output_tensor=} is not close to expected_tensor {gr_expected_tensor=}"
-)
-print_rank(f"cuda group reduce for ext_nccl_backend {gr_input_tensor=} into {gr_output_tensor=}, expected {gr_expected_tensor=}")
-
+# if not use_ncu:
+#     work = group_reduce_collective(
+#         input=gr_input_tensor,
+#         output=gr_output_tensor,
+#         input_split_size_list=gr_input_split_size_list,
+#         output_split_size_list=gr_output_split_size_list,
+#         dst_index_list=dst_index_list,
+#         src_indices_list=src_indices_list,
+#         group=world_group,
+#         async_op=True,
+#     )
+#     work.wait()
+#     assert torch.allclose(gr_output_tensor, gr_expected_tensor), (
+#         f"output_tensor {gr_output_tensor=} is not close to expected_tensor {gr_expected_tensor=}"
+#     )
+#     print_rank(f"cuda group reduce for ext_nccl_backend {gr_input_tensor=} into {gr_output_tensor=}, expected {gr_expected_tensor=}")
 
 
 # --- try multi-stream and profiling --- #
@@ -403,23 +406,23 @@ assert torch.allclose(gc_out, gc_out_exp), (
     f"output_tensor {gc_out=} is not close to expected_tensor {gc_out_exp=}"
 )
 
-work = group_reduce_collective(
-    input=gr_inp,
-    output=gr_out,
-    input_split_size_list=gr_input_split_size_list,
-    output_split_size_list=gr_output_split_size_list,
-    dst_index_list=dst_index_list,
-    src_indices_list=src_indices_list,
-    group=world_group,
-    async_op=True,
-)
-work.wait()
-assert torch.allclose(gr_out, gr_out_exp), (
-    f"output_tensor {gr_out=} is not close to expected_tensor {gr_out_exp=}"
-)
+if not use_ncu_for_profile:
+    print_rank(f"group reduce shape: {gr_inp.shape=} | {gr_out.shape=}")
+    work = group_reduce_collective(
+        input=gr_inp,
+        output=gr_out,
+        input_split_size_list=gr_input_split_size_list,
+        output_split_size_list=gr_output_split_size_list,
+        dst_index_list=dst_index_list,
+        src_indices_list=src_indices_list,
+        group=world_group,
+        async_op=True,
+    )
+    work.wait()
+    assert torch.allclose(gr_out, gr_out_exp), (
+        f"output_tensor {gr_out=} is not close to expected_tensor {gr_out_exp=}"
+    )
 
-
-profile_mode = os.environ.get("EXAMPLE_PROFILE_MODE", "0") == "1"
 if profile_mode:
     prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
 else:
