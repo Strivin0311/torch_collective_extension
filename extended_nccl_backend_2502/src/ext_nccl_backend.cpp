@@ -1854,6 +1854,26 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
         );
       }
 
+      // make group-reduce post-process args
+      auto args = torch::cuda::nccl::GroupReducePostProcessArgs(
+          output.data_ptr(),
+          repeated_output.data_ptr(),
+
+          d_split_size_list.data_ptr<int64_t>(),
+          d_num_repeats_list.data_ptr<int64_t>(),
+          d_cu_split_size_list.data_ptr<int64_t>(),
+          d_repeated_cu_split_size_list.data_ptr<int64_t>(),
+
+          meta_info.seqlen,
+          meta_info.repeated_seqlen,
+          meta_info.num_splits,
+          meta_info.max_split_size,
+          input.stride(0),
+
+          input.scalar_type(),
+          stream.stream()
+      );
+
       torch::cuda::nccl::group_reduce_nccl_kernel(
           input.data_ptr(),
           output.data_ptr(),
@@ -1867,15 +1887,7 @@ c10::intrusive_ptr<Work> ExtProcessGroupNCCL::group_reduce(
           input.scalar_type(),
           comm,
           stream,
-          /* for post-process kernel */
-          d_split_size_list.data_ptr<int64_t>(),
-          d_num_repeats_list.data_ptr<int64_t>(),
-          d_cu_split_size_list.data_ptr<int64_t>(),
-          d_repeated_cu_split_size_list.data_ptr<int64_t>(),
-          meta_info.seqlen,
-          meta_info.repeat_dim_size,
-          meta_info.num_splits,
-          meta_info.max_split_size
+          args
       );
       return ncclSuccess;
     },

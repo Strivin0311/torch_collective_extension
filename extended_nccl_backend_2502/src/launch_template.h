@@ -28,7 +28,6 @@
 
 using namespace cute;
 
-
 template<typename T_out, uint32_t kBlockM, uint32_t kBlockN>
 void run_fast_zero_fill(
     T_out* ptr_O,
