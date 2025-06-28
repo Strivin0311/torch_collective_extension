@@ -13,8 +13,8 @@ export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
-export EXAMPLE_PROFILE_MODE=1
-export EXAMPLE_USE_NCU_FOR_PROFILE=1
+export EXAMPLE_PROFILE_MODE=0
+export EXAMPLE_USE_NCU_FOR_PROFILE=0
 export EXAMPLE_SANITIZER_MODE=0
 
 
@@ -32,7 +32,7 @@ if [[ $EXAMPLE_PROFILE_MODE == "1" ]]; then
         ncu \
             --target-processes all \
             --set full \
-            --kernel-name regex:".*group_reduce*" \
+            --kernel-name device_kernel \
             -f -o example.ncu-rep \
             $CMD > example.log 2>&1
     else

@@ -16,7 +16,7 @@ sources = [
 
 include_dirs = [
     f"{os.path.dirname(os.path.abspath(__file__))}/include/",
-    "/home/littsk/kato/workspace/attn-library/magiattn/magi_attention/csrc/cutlass/include/,"
+    "/home/littsk/kato/workspace/attn-library/magiattn/magi_attention/csrc/cutlass/include/", # NOTE: replace to your own cutlass path
 ]
 
 # torch include and source
@@ -38,6 +38,7 @@ if torch.cuda.is_available():
         # extra_link_args=extra_link_args,
         extra_compile_args={
             # 'cxx': ['-std=c++17', '-fPIC'],
+            # 'nvcc': ['-std=c++17', '-Xcompiler', '-fPIC']
             'nvcc': ['-lineinfo']
         }
     )
@@ -56,7 +57,7 @@ package_data = {
     '': ['*.pyi'],
 }
 
-
+# set up
 setup(
     name="ext_nccl_backend",
     version="0.0.1",
