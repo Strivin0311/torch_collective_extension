@@ -1,13 +1,12 @@
 
 #include "../include/group_collective.cuh"
-#include <ATen/cuda/Atomic.cuh>
 #include "launch_template.h"
 
 
 #define GROUP_REDUCE_POST_PROCESS_NUM_SMS 32 /* use the maximum number of SMs of nccl comm kernel */
 #define GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE 1024 /* use the maximum block size for any SM */
 
-// #define GROUP_REDUCE_POST_PROCESS_WITH_CUTE
+#define GROUP_REDUCE_POST_PROCESS_WITH_CUTE
 
 namespace torch::cuda::nccl {
 
@@ -118,18 +117,18 @@ namespace torch::cuda::nccl {
     void run_group_reduce_post_process(GroupReducePostProcessArgs& args) {
         #ifdef GROUP_REDUCE_POST_PROCESS_WITH_CUTE
         group_reduce_nccl_post_process_cute_kernel<cutlass::bfloat16_t, 128>(
-            static_cast<cutlass::bfloat16_t*>(recv_buffer),
-            static_cast<cutlass::bfloat16_t*>(repeated_recv_buffer),
-            seqlen,
-            stride0,
-            repeated_seqlen,
-            num_splits,
-            max_split_size,
-            d_cu_split_size_list, // cu_split_size_o,
-            d_split_size_list, // split_size_list,
-            d_repeated_cu_split_size_list, // cu_split_size_r,
-            d_num_repeats_list, // num_repeats_list,
-            stream.stream()
+            static_cast<cutlass::bfloat16_t*>(args.recv_buffer),
+            static_cast<cutlass::bfloat16_t*>(args.repeated_recv_buffer),
+            args.seqlen,
+            args.stride0,
+            args.repeated_seqlen,
+            args.num_splits,
+            args.max_split_size,
+            args.d_cu_split_size_list, // cu_split_size_o,
+            args.d_split_size_list, // split_size_list,
+            args.d_repeated_cu_split_size_list, // cu_split_size_r,
+            args.d_num_repeats_list, // num_repeats_list,
+            args.stream
         );
         #else
         int blockSize = GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE; int gridSize = args.seqlen;

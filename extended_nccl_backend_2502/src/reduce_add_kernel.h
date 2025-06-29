@@ -11,13 +11,11 @@
 #include "cutlass/pipeline/pipeline.hpp"
 #include "cutlass/arch/grid_dependency_control.h"
 
-// #include "utils.h"
-
 
 using namespace cute;
 
 template<typename T_out_, uint32_t kBlockM_, uint32_t kBlockN_, class ArchTag_>
-class FastZeroFillKernel {
+class FastRangeReduceKernel {
 
 public:
     using ArchTag = ArchTag_;
@@ -27,14 +25,12 @@ public:
 
     using TileShapeMN = cute::Shape<Int<kBlockM>, Int<kBlockN>>;
 
-
     // (seqlen_o, hidden_size)
     using ShapeO = cute::Shape<int32_t, int32_t>;
     using StrideO = cute::Stride<int64_t, _1>;
     // (seqlen_r, hidden_size)
     using ShapeR = cute::Shape<int32_t, int32_t>; 
     using StrideR = cute::Stride<int64_t, _1>;  
-
 
     // These are for storing the output tensor without TMA (e.g., for setting output to zero)
     static constexpr int kGmemElemsPerStore = sizeof(cute::uint128_t) / sizeof(T_out);
@@ -53,7 +49,6 @@ public:
 
     // Number of epilogue threads must be a multiple of kGmemThreadsPerRow
     static_assert(kBlockM % kGmemThreadsPerRow == 0, "kBlockM must be a multiple of kGmemThreadsPerRow");
-
 
     // Layout of Epilogue threads, named GmemLayoutAtom
     using GmemLayoutAtom = Layout<Shape <Int<kBlockM / kGmemThreadsPerRow>, Int<kGmemThreadsPerRow>>,
@@ -160,12 +155,6 @@ public:
             return;
         }
 
-        // if (thread_idx == 0) {
-        //     printf("block %d, bidh %d, bidb %d, offset_o %d, split_size %ld, offset_r %ld, num_repeats %ld\n", block, bidh, bidb, offset_o, split_size, offset_r, num_repeats);
-        // }
-        // int32_t const seqlen_o = cute::get<0>(params.shape_O);
-        // int32_t const head_dim_o = cute::get<1>(params.shape_O);
-
         // Initialize gmem_tiled_copy_O and gmem_thr_copy_O
         GmemTiledCopyO gmem_tiled_copy_O;
         auto gmem_thr_copy_O = gmem_tiled_copy_O.get_thread_slice(thread_idx);
@@ -174,14 +163,15 @@ public:
         Tensor mO = make_tensor(make_gmem_ptr(params.ptr_O), params.shape_O, params.stride_O);
         Tensor gO = local_tile(cute::domain_offset(make_coord(offset_o, _0{}), mO) , TileShapeMN{}, make_coord(block, bidh));  // (M, K)
 
-        // Initialize tOrO and clear it
+        // Initialize tOrO and copy from tOgO
         Tensor tOrO = make_fragment_like(gmem_thr_copy_O.partition_D(make_tensor<T_out>(TileShapeMN{})));
         Tensor tOgO = gmem_thr_copy_O.partition_S(gO);
         cute::copy(gmem_tiled_copy_O, tOgO, tOrO);
         
-
+        // Initialize tOrR
         Tensor tOrR = make_fragment_like(gmem_thr_copy_O.partition_D(make_tensor<T_out>(TileShapeMN{})));
 
+        // For-loop each partial split
         for (int i = 0; i < num_repeats; ++i) {
             int offset_r_i = offset_r + i * split_size;
 
@@ -197,8 +187,6 @@ public:
                 tOrO(i) += tOrR(i);
             }
         }
-
-
 
         cute::copy(gmem_tiled_copy_O, tOrO, tOgO);
     }

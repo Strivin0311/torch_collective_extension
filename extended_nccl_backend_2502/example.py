@@ -271,9 +271,8 @@ work = group_cast_collective(
 
 # check result
 work.wait()
-assert torch.allclose(gc_out, gc_out_exp), (
-    f"[RANK {rank}] For group cast, output_tensor {gc_out=} is not close to expected_tensor {gc_out_exp=}"
-)
+print_rank(f"For group cast, {gc_out=} is expected to be all close to {gc_out_exp=}")
+assert torch.allclose(gc_out, gc_out_exp)
 
 
 # --- try group reduce --- #
@@ -349,7 +348,6 @@ gr_post_process_bytes = get_group_reduce_post_process_bytes(
     src_indices_list=src_indices_list,
     dtype=dtype,
 )
-print_rank(f"{gr_post_process_bytes=}")
 
 work = group_reduce_collective(
     input=gr_inp,
@@ -362,9 +360,8 @@ work = group_reduce_collective(
     async_op=True,
 )
 work.wait()
-assert torch.allclose(gr_out, gr_out_exp), (
-    f"[RANK {rank}] For group-reduce, output_tensor {gr_out=} is not close to expected_tensor {gr_out_exp=}"
-)
+print_rank(f"For group-reduce (with {gr_post_process_bytes=}), {gr_out=} is expected to be all close to {gr_out_exp=}")
+assert torch.allclose(gr_out, gr_out_exp)
 
 
 # --- try multi-stream and profiling --- #

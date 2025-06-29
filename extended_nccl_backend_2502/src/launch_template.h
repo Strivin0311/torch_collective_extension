@@ -29,7 +29,7 @@
 using namespace cute;
 
 template<typename T_out, uint32_t kBlockM, uint32_t kBlockN>
-void run_fast_zero_fill(
+void run_fast_range_reduce(
     T_out* ptr_O,
     T_out* ptr_R,
 
@@ -47,10 +47,9 @@ void run_fast_zero_fill(
     cudaStream_t stream
 ) {
     using ArchTag = cutlass::arch::Sm90;
-    using ZeroFillKernel = FastZeroFillKernel<T_out, kBlockM, kBlockN, ArchTag>;
+    using RangeReduceKernel = FastRangeReduceKernel<T_out, kBlockM, kBlockN, ArchTag>;
 
-    std::cout << "seqlen: " << seqlen << ", hidden_size: " << hidden_size << ", seqlen_r: " << seqlen_r << ", num_splits: " << num_splits << std::endl;
-    auto kernel_params = ZeroFillKernel::to_underlying_arguments({
+    auto kernel_params = RangeReduceKernel::to_underlying_arguments({
         ptr_O,
         {seqlen, hidden_size},
         {hidden_size, _1{}},
@@ -65,15 +64,15 @@ void run_fast_zero_fill(
         max_split_size
     });
 
-    dim3 grid_dims = ZeroFillKernel::get_grid_shape(kernel_params);
-    dim3 block_dims = ZeroFillKernel::get_block_shape();
+    dim3 grid_dims = RangeReduceKernel::get_grid_shape(kernel_params);
+    dim3 block_dims = RangeReduceKernel::get_block_shape();
 
-    auto kernel = cutlass::device_kernel<ZeroFillKernel>;
-    int smem_size = ZeroFillKernel::SharedStorageSize;
+    auto kernel = cutlass::device_kernel<RangeReduceKernel>;
+    int smem_size = RangeReduceKernel::SharedStorageSize;
     if (smem_size >= 48 * 1024) {
         CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     }
-    cutlass::kernel_launch<ZeroFillKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
+    cutlass::kernel_launch<RangeReduceKernel>(grid_dims, block_dims, smem_size, stream, kernel_params, false /*launch_with_pdl*/);
     CHECK_CUDA_KERNEL_LAUNCH();
 }
 
@@ -98,7 +97,7 @@ void group_reduce_nccl_post_process_cute_kernel(
 ) {
     // TODO: tuning block size
     static constexpr uint32_t kBlockM = 128;
-    run_fast_zero_fill<T_out, kBlockM, kBlockN>(
+    run_fast_range_reduce<T_out, kBlockM, kBlockN>(
         ptr_O,
         ptr_R,
         seqlen,

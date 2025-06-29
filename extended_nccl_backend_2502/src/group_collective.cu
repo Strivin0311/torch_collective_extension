@@ -3,7 +3,6 @@
 #endif
 
 #include "../include/group_collective.cuh"
-#include <ATen/cuda/Atomic.cuh>
 #include "group_reduce_post_process.cuh"
 
 

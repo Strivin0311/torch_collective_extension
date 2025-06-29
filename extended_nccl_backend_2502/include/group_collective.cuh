@@ -57,6 +57,7 @@ namespace torch::cuda::nccl {
             repeated_recv_buffer_shape(std::move(repeated_recv_buffer_shape)) {}
     };
 
+
     struct GroupReducePostProcessArgs {
         void* recv_buffer;
         void* repeated_recv_buffer;
@@ -104,6 +105,7 @@ namespace torch::cuda::nccl {
             type(type),
             stream(stream) {}
     };
+
 
     TORCH_CUDA_CPP_API void group_cast_nccl_kernel(
         void* send_buffer,

@@ -18,7 +18,6 @@
 #include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
 #include <torch/csrc/cuda/nccl.h>
 #include <c10/util/WaitCounter.h>
-// #include <c10/util/Exception.h>
 
 
 /** NOTE: in this header file, pytorch defines a lot of type_caster 
@@ -32,7 +31,6 @@
 
 #include "ext_nccl_comm.hpp"
 #include "group_collective.cuh"
-
 
 namespace c10d {
 
