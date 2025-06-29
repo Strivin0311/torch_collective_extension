@@ -33,6 +33,71 @@
 
 #include "magi_nccl_backend.hpp"
 
+
+
+
+/** NOTE: copied from torch/csrc/distributed/c10d/init.cpp
+ * to pybind-define a gil-safe destructor for this module
+ */
+namespace {
+// Wrapper to ensure GIL is released before destructing ProcessGroupGloo
+// TODO: move this somewhere more generally useful
+template <typename T>
+class IntrusivePtrNoGilDestructor {
+    c10::intrusive_ptr<T> impl_{};
+
+    public:
+    IntrusivePtrNoGilDestructor() = default;
+    IntrusivePtrNoGilDestructor(const IntrusivePtrNoGilDestructor&) = default;
+    IntrusivePtrNoGilDestructor(IntrusivePtrNoGilDestructor&&) noexcept = default;
+    IntrusivePtrNoGilDestructor& operator=(const IntrusivePtrNoGilDestructor&) =
+        default;
+    IntrusivePtrNoGilDestructor& operator=(
+        IntrusivePtrNoGilDestructor&&) noexcept = default;
+    /* implicit */ IntrusivePtrNoGilDestructor(c10::intrusive_ptr<T> impl)
+        : impl_(std::move(impl)) {}
+    // This ctor is very important; see
+    // https://github.com/pybind/pybind11/issues/2957
+    explicit IntrusivePtrNoGilDestructor(T* impl)
+        // NOLINTNEXTLINE(bugprone-exception-escape)
+        : impl_(c10::intrusive_ptr<T>::unsafe_steal_from_new(impl)) {}
+    // NOLINTNEXTLINE(bugprone-exception-escape)
+    ~IntrusivePtrNoGilDestructor() {
+    if (impl_) {
+        if (PyGILState_Check()) {
+        pybind11::gil_scoped_release release;
+        impl_.reset();
+        } else {
+        impl_.reset();
+        }
+    }
+    }
+    T& operator*() const noexcept {
+    return *impl_;
+    }
+    T* operator->() const noexcept {
+    return impl_.get();
+    }
+    [[nodiscard]] T* get() const noexcept {
+    return impl_.get();
+    }
+    void reset() noexcept {
+    impl_.reset();
+    }
+    operator bool() const noexcept {
+    return impl_;
+    }
+};
+
+} // anonymous namespace
+
+PYBIND11_DECLARE_HOLDER_TYPE(T, IntrusivePtrNoGilDestructor<T>, true)
+
+template <typename T>
+using intrusive_ptr_no_gil_destructor_class_ =
+    py::class_<T, IntrusivePtrNoGilDestructor<T>>;    
+
+
 namespace c10d {
 
 constexpr const char* const kNCCLAbortedCommStoreKey = "NCCLABORTEDCOMM";
@@ -5170,6 +5235,124 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::_allgather_base(
       OpType::_ALLGATHER_BASE,
       "nccl:_all_gather_base",
       avoidRecordStreams);
+}
+
+
+
+// factory method to create an magi nccl process group
+c10::intrusive_ptr<Backend> MagiNCCLBackend::createMagiNCCLBackend(
+    const c10::intrusive_ptr<::c10d::Store>& store,
+    int rank,
+    int size,
+    const std::chrono::duration<float>& /* unused */
+) {
+    return c10::make_intrusive<MagiNCCLBackend>(store, rank, size);
+}
+  
+  
+/** NOTE: `TORCH_EXTENSION_NAME` is an env var
+ * that will be automatically translated to the extention module name defined in setup.py
+ * e.g. since this module is named `ext_nccl_backend`
+ * thus in the python script, we can use this function (though no use for now) as follows:
+ * import ext_nccl_backend; print(ext_nccl_backend.createMagiNCCLBackend)
+ */
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    /** NOTE:
+     * this factory method is used in ext_nccl_backend.hpp:static void MagiNCCLBackendConstructor()
+     * to automatically create and register this backend to torch.distributed.Backend
+     * thus it needs to be be individually registered in advance here
+     */
+    m.def("createMagiNCCLBackend", &MagiNCCLBackend::createMagiNCCLBackend);
+  
+    auto torch_c10d = py::module::import("torch._C._distributed_c10d");
+    auto backend = torch_c10d.attr("Backend"); // inherit from Backend
+    auto module = py::handle(m).cast<py::module>();
+  
+    auto magiNcclBackend = 
+        intrusive_ptr_no_gil_destructor_class_<MagiNCCLBackend>(
+            module, "MagiNCCLBackend", backend)
+        .def(
+            py::init([](const c10::intrusive_ptr<::c10d::Store>& store,
+                       int rank,
+                       int size) {
+              // copied from torch/csrc/distributed/c10d/init.cpp
+              // gil_scoped_release is not safe as a call_guard for constructor
+              // see: https://github.com/pybind/pybind11/issues/5473
+              py::gil_scoped_release nogil;
+              return c10::make_intrusive<MagiNCCLBackend>(
+                  store, rank, size);
+            }),
+            py::arg("store"),
+            py::arg("rank"),
+            py::arg("size"),
+            "Constructor to create MagiNCCLBackend instance"
+        )
+        // .def(
+        //   "group_cast",
+        //   &MagiNCCLBackend::group_cast,
+        //   py::arg("input_tensor"),
+        //   py::arg("output_tensor"),
+        //   py::arg("input_split_size_list"),
+        //   py::arg("output_split_size_list"),
+        //   py::arg("dst_indices_list"),
+        //   py::arg("src_index_list"),
+        //   // py::arg("opts") = ::c10d::GroupCastOptions(),
+        //   py::call_guard<py::gil_scoped_release>(),
+        //   R"(An nccl-based group cast collective operation that used the self-modified extended collective interface.)"
+        // )
+        // .def(
+        //   "group_reduce",
+        //   &MagiNCCLBackend::group_reduce,
+        //   py::arg("input_tensor"),
+        //   py::arg("output_tensor"),
+        //   py::arg("input_split_size_list"),
+        //   py::arg("output_split_size_list"),
+        //   py::arg("dst_index_list"),
+        //   py::arg("src_indices_list"),
+        //   // py::arg("opts") = ::c10d::GroupReduceOptions(),
+        //   py::call_guard<py::gil_scoped_release>(),
+        //   R"(An nccl-based group reduce collective operation that used the self-modified extended collective interface.)"
+        // )
+        // .def_property_readonly(
+        //   "nccl_stream",
+        //   [](MagiNCCLBackend& self) -> py::object {
+        //     /** NOTE: here we do some hacky thing to get the nccl cuda stream in python-end
+        //      * 
+        //      * We first list the limitations as follows:
+        //      *    1. at::cuda::CUDAStream` is not registered by pytorch in python-end,
+        //      *      and we need to unwrap it to c10::Stream
+        //      *    2. it is not c10::Stream, but THPStream, that is directly linked to torch.cuda.Stream,
+        //      *      thus we need to convert a c10::Stream to THPStream
+        //      *    3. although pytorch gives a `THPStream_Wrap` function in `torch/csrc/Stream.h`
+        //      *      as well as a pybind type_cast function in `torch/csrc/utils/pybind.h`,
+        //      *      THPStream_Wrap is a local symbol in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so
+        //      *      thus we cannot directly access it
+        //      * 
+        //      * As a result, we give up the following code:
+        //      *    c10::Stream c10_stream = self.getNCCLStream().unwrap();
+        //      *    return py::reinterpret_steal<py::object>(THPStream_Wrap(c10_stream));
+        //      * 
+        //      * Therefore, we directly access the torch.cuda.Stream module 
+        //      * and initialize a pybind object with the internal cuda stream ptr as kwargs
+        //      */
+  
+        //     thread_local py::object cached_nccl_stream = py::none();
+        //     if (!cached_nccl_stream.is_none()) { // already cached
+        //         return cached_nccl_stream;
+        //     }
+  
+        //     /* everything is ok, only the stream id is not identical, but seems no problem  */
+        //     at::cuda::CUDAStream cuda_stream = self.getNCCLStream();
+        //     auto torch = py::module::import("torch");
+        //     auto torch_cuda_stream_class = torch.attr("cuda").attr("Stream");
+        //     py::kwargs kwargs;
+        //     kwargs["stream_ptr"] = py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()));
+        //     cached_nccl_stream = torch_cuda_stream_class(**kwargs);
+        //     return cached_nccl_stream;
+        //   },
+        //   R"(Return the NCCL cuda stream w.r.t the current device)"
+        // )
+        ;
 }
 
 } // namespace c10d

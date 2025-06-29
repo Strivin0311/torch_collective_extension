@@ -37,6 +37,10 @@
 
 #include <torch/custom_class.h>
 
+#include <torch/python.h>
+#include <pybind11/chrono.h>
+
+
 namespace c10d {
 
 // Control broadcasting of NCCL uniqueId
@@ -783,6 +787,36 @@ class TORCH_API MagiNCCLBackend : public Backend {
   bool verifyWorkTimeoutForTest(
       const c10::intrusive_ptr<Work>& work,
       const std::chrono::milliseconds& timeout);
+
+    
+    // factory method to create an magi nccl process group
+  static c10::intrusive_ptr<Backend> createMagiNCCLBackend(
+        const c10::intrusive_ptr<::c10d::Store>& store,
+        int rank,
+        int size,
+        const std::chrono::duration<float>& /* unused */
+    );
+
+    /** NOTE: this is a static method tagged with `__attribute__((constructor)`,
+     * then it will be automatically called in class method `Backend.register_backend` in `distributed_c10d.py`
+     * and this magi nccl process group backend object will be instantiated later using
+     *  1. `backend_class = creator_fn(backend_prefix_store, group_rank, group_size, timeout)`, if `extended_api=False`
+     *  2. `backend_class = creator_fn(dist_backend_opts, backend_options)`, otherwise
+     * and the process group object will also register it using `pg._register_backend`
+     */
+  static void MagiNCCLBackendConstructor() __attribute__((constructor)) {
+        // import torch.distributed python module
+        py::object module = py::module::import("torch.distributed");
+        // access the register_backend method of the class Backend
+        py::object register_backend = module.attr("Backend").attr("register_backend");
+        // register using the factory method to create an magi nccl process group
+        register_backend(
+            "magi_nccl", // backend name
+            py::cpp_function(createMagiNCCLBackend), // func
+            false, // extended_api: bool, set to false to not using backend options
+            "cuda" // supported devices: Optional[Union[str, List[str]]] = None, set to only cuda
+    );
+}
 
  protected:
   // Helper that broadcasts nccl unique ID to all ranks through the store
