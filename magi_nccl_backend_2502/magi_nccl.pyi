@@ -14,7 +14,7 @@ class GroupReduceOptions:
     asyncOp: bool
 
 
-class ExtProcessGroupNCCL(dist.ProcessGroupNCCL):
+class MagiProcessGroupNCCL(dist.ProcessGroupNCCL):
     
     def __init__(
         self,

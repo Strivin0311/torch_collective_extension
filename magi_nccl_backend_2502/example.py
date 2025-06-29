@@ -7,18 +7,18 @@ import torch.distributed as dist
 
 import magi_nccl
 from magi_nccl import MagiProcessGroupNCCL
-from src import nvtx
-from src.ext_distributed_c10d import (
+from magi_nccl_interface import (
     dummy_all_gather_into_tensor,
     extended_all_to_all_single,
     group_cast_collective,
     group_reduce_collective,
 )
-from src.utils import (
+from utils import (
     sanity_check_for_group_cast_meta_args_per_rank,
     sanity_check_for_group_reduce_meta_args_per_rank,
     get_group_reduce_post_process_bytes,
 )
+import nvtx
 
 # get some env variable as flags
 profile_mode = os.environ.get("EXAMPLE_PROFILE_MODE", "0") == "1"
