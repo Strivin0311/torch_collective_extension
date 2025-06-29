@@ -15,7 +15,7 @@
 using namespace cute;
 
 template<typename T_out_, uint32_t kBlockM_, uint32_t kBlockN_, class ArchTag_>
-class FastRangeReduceKernel {
+class RepeatReduceKernel {
 
 public:
     using ArchTag = ArchTag_;
@@ -67,14 +67,17 @@ public:
         T_out* ptr_O;
         ShapeO const shape_O;
         StrideO const stride_O;
+
         T_out* ptr_R;
         ShapeR const shape_R;
         StrideR const stride_R;
-        int64_t const num_splits;
+
         int64_t const * cu_split_size_o;
         int64_t const * split_size_list;
         int64_t const * cu_split_size_r;
         int64_t const * num_repeats_list;
+
+        int64_t const num_splits;
         int64_t const max_split_size;
     };
 
@@ -82,14 +85,17 @@ public:
         T_out* ptr_O;
         ShapeO const shape_O;
         StrideO const stride_O;
+
         T_out* ptr_R;
         ShapeR const shape_R;
         StrideR const stride_R;
-        int64_t const num_splits;
+        
         int64_t const * cu_split_size_o;
         int64_t const * split_size_list;
         int64_t const * cu_split_size_r;
         int64_t const * num_repeats_list;
+
+        int64_t const num_splits;
         int64_t const max_split_size;
     };
 
@@ -102,14 +108,17 @@ public:
             args.ptr_O,
             args.shape_O,
             args.stride_O,
+
             args.ptr_R,
             args.shape_R,
             args.stride_R,
-            args.num_splits,
+            
             args.cu_split_size_o,
             args.split_size_list,
             args.cu_split_size_r,
             args.num_repeats_list,
+
+            args.num_splits,
             args.max_split_size
         };
     }

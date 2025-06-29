@@ -1,6 +1,6 @@
 
 #include "../include/group_collective.cuh"
-#include "launch_template.h"
+#include "repeat_reduce_launch_template.h"
 
 
 #define GROUP_REDUCE_POST_PROCESS_NUM_SMS 32 /* use the maximum number of SMs of nccl comm kernel */
@@ -29,12 +29,12 @@ namespace torch::cuda::nccl {
         return low - 1; // low == high
     }
 
-    /** pure-cuda naive repeat-interleaved range reduce
+    /** pure-cuda naive repeat-interleaved reduce
      * NOTE: this version uses uses each block to process a single row
      * but the highest HBM throughput (no limit to grid size) only reachs ~30%
     */
     template <typename scalar_t>
-    __global__ void group_reduce_nccl_post_process_cuda_kernel(
+    __global__ void repeat_reduce_cuda_kernel(
         scalar_t* recv_buffer,
         const scalar_t* repeated_recv_buffer,
         const int64_t* d_split_size_list,
@@ -116,20 +116,7 @@ namespace torch::cuda::nccl {
      */
     void run_group_reduce_post_process(GroupReducePostProcessArgs& args) {
         #ifdef GROUP_REDUCE_POST_PROCESS_WITH_CUTE
-        group_reduce_nccl_post_process_cute_kernel<cutlass::bfloat16_t, 128>(
-            static_cast<cutlass::bfloat16_t*>(args.recv_buffer),
-            static_cast<cutlass::bfloat16_t*>(args.repeated_recv_buffer),
-            args.seqlen,
-            args.stride0,
-            args.repeated_seqlen,
-            args.num_splits,
-            args.max_split_size,
-            args.d_cu_split_size_list, // cu_split_size_o,
-            args.d_split_size_list, // split_size_list,
-            args.d_repeated_cu_split_size_list, // cu_split_size_r,
-            args.d_num_repeats_list, // num_repeats_list,
-            args.stream
-        );
+        repeat_reduce_cute_kernel<cutlass::bfloat16_t, 128>(args);
         #else
         int blockSize = GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE; int gridSize = args.seqlen;
         gridSize = std::min(gridSize, GROUP_REDUCE_POST_PROCESS_NUM_SMS);
@@ -141,9 +128,9 @@ namespace torch::cuda::nccl {
         AT_DISPATCH_ALL_TYPES_AND2(
             at::ScalarType::Half, at::ScalarType::BFloat16, /* add float16/bfloat16 to dispatch types */
             args.type,
-            "group_reduce_nccl_post_process_cuda_kernel",
+            "repeat_reduce_cuda_kernel",
             [&] {
-            group_reduce_nccl_post_process_cuda_kernel<scalar_t> /* auto-deduced `scalar_t` by the macro */
+            repeat_reduce_cuda_kernel<scalar_t> /* auto-deduced `scalar_t` by the macro */
                 <<<gridDims, blockDims, sharedMemSize, args.stream>>>(
                     static_cast<scalar_t*>(args.recv_buffer),
                     static_cast<const scalar_t*>(args.repeated_recv_buffer),
