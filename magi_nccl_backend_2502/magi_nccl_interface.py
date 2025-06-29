@@ -17,7 +17,7 @@ from torch._C._distributed_c10d import (
     AllToAllOptions,
 )
 
-from magi_nccl import MagiProcessGroupNCCL
+from magi_nccl import MagiNCCLBackend
 
 
 @_exception_logger
@@ -122,8 +122,8 @@ def dummy_all_gather_into_tensor(
             return None
 
     backend = group._get_backend(torch.device("cuda"))
-    assert isinstance(backend, MagiProcessGroupNCCL), (
-        f"expected MagiProcessGroupNCCL, got {type(group)=}"
+    assert isinstance(backend, MagiNCCLBackend), (
+        f"expected MagiNCCLBackend, got {type(group)=}"
     )
     
     work = backend._dummy_allgather_base(output_tensor, input_tensor, opts)
@@ -256,8 +256,8 @@ def extended_all_to_all_single(
     group = group or _get_default_group()
     
     backend = group._get_backend(torch.device("cuda"))
-    assert isinstance(backend, MagiProcessGroupNCCL), (
-        f"expected MagiProcessGroupNCCL, got {type(group)=}"
+    assert isinstance(backend, MagiNCCLBackend), (
+        f"expected MagiNCCLBackend, got {type(group)=}"
     )
     
     work = backend.extended_alltoall_base(
@@ -387,8 +387,8 @@ def group_cast_collective(
     group = group or _get_default_group()
     
     backend = group._get_backend(torch.device("cuda"))
-    assert isinstance(backend, MagiProcessGroupNCCL), (
-        f"expected MagiProcessGroupNCCL, got {type(group)=}"
+    assert isinstance(backend, MagiNCCLBackend), (
+        f"expected MagiNCCLBackend, got {type(group)=}"
     )
     
     work = backend.group_cast(
@@ -523,8 +523,8 @@ def group_reduce_collective(
     group = group or _get_default_group()
     
     backend = group._get_backend(torch.device("cuda"))
-    assert isinstance(backend, MagiProcessGroupNCCL), (
-        f"expected MagiProcessGroupNCCL, got {type(group)=}"
+    assert isinstance(backend, MagiNCCLBackend), (
+        f"expected MagiNCCLBackend, got {type(group)=}"
     )
     
     work = backend.group_reduce(

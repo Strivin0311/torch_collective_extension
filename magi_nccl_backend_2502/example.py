@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 import magi_nccl
-from magi_nccl import MagiProcessGroupNCCL
+from magi_nccl import MagiNCCLBackend
 from magi_nccl_interface import (
     dummy_all_gather_into_tensor,
     extended_all_to_all_single,
@@ -43,7 +43,7 @@ def print_rank(msg: str):
     print(f"\n[RANK {rank}] {msg}\n", flush=True)
 
 # just print the function name to see if it is loaded
-print_rank(f"{magi_nccl.createMagiProcessGroupNCCL=}")
+print_rank(f"{magi_nccl.createMagiNCCLBackend=}")
 
 
 # --- init pg and backend --- #
@@ -54,18 +54,18 @@ print_rank(f"WorldGroup: {type(world_group)=}, {world_group._get_backend_name()=
 
 backend: dist.Backend = world_group._get_backend(torch.device(device))
 print_rank(f"WorldGroup: {type(backend)=}")
-assert isinstance(backend, MagiProcessGroupNCCL), (
-    f"expected MagiProcessGroupNCCL, got {type(backend)=}"
+assert isinstance(backend, MagiNCCLBackend), (
+    f"expected MagiNCCLBackend, got {type(backend)=}"
 )
-backend: MagiProcessGroupNCCL = cast(MagiProcessGroupNCCL, backend)
+backend: MagiNCCLBackend = cast(MagiNCCLBackend, backend)
 
 pg = dist.new_group(list(range(world_size)), backend="magi_nccl")
 print_rank(f"NewGroup: {type(pg)=}, {pg._get_backend_name()=}")
 
 pg_backend: dist.Backend = pg._get_backend(torch.device(device))
 print_rank(f"NewGroup: {type(pg_backend)=}")
-assert isinstance(pg_backend, MagiProcessGroupNCCL), (
-    f"expected MagiProcessGroupNCCL, got {type(pg_backend)=}"
+assert isinstance(pg_backend, MagiNCCLBackend), (
+    f"expected MagiNCCLBackend, got {type(pg_backend)=}"
 )
 
 
