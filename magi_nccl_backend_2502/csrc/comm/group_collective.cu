@@ -2,7 +2,7 @@
 #define USE_NCCL
 #endif
 
-#include "../include/group_collective.cuh"
+#include "group_collective.cuh"
 #include "group_reduce_post_process.cuh"
 
 

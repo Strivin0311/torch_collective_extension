@@ -11,7 +11,7 @@
 #include <cutlass/kernel_hardware_info.h>
 #include <cutlass/kernel_launch.h>
 
-#include "../include/group_collective.cuh"
+#include "group_collective.cuh"
 #include "repeat_reduce_kernel.h"
 #include "static_switch.h"
 

@@ -1,5 +1,5 @@
 
-#include "../include/group_collective.cuh"
+#include "group_collective.cuh"
 #include "repeat_reduce_launch_template.h"
 
 
