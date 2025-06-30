@@ -117,11 +117,11 @@ namespace torch::cuda::nccl {
         auto nccl_comm = to_nccl_comm(comm);
 
         int64_t input_offset = 0, output_offset = 0;
-        NCCLCHECK(ncclGroupStart());
+        CHECK_NCCL(ncclGroupStart());
         for (size_t input_split_idx = 0; input_split_idx < num_input_splits; ++input_split_idx) {
             auto input_size = input_split_size_list[input_split_idx] * stride0;
             for (auto dst_rank : dst_indices_list[input_split_idx]) {
-                NCCLCHECK(ncclSend(
+                CHECK_NCCL(ncclSend(
                     (const void*) (send_buffer + input_offset * element_size),
                     input_size,
                     nccl_data_type,
@@ -135,7 +135,7 @@ namespace torch::cuda::nccl {
         for (size_t output_split_idx = 0; output_split_idx < num_output_splits; ++output_split_idx) {
             auto src_rank = src_index_list[output_split_idx];
             auto output_size = output_split_size_list[output_split_idx] * stride0;
-            NCCLCHECK(ncclRecv(
+            CHECK_NCCL(ncclRecv(
                 (void *) (recv_buffer + output_offset * element_size),
                 output_size,
                 nccl_data_type,
@@ -145,7 +145,7 @@ namespace torch::cuda::nccl {
             ));
             output_offset += output_size;
         }
-        NCCLCHECK(ncclGroupEnd());
+        CHECK_NCCL(ncclGroupEnd());
     }
 
     // group reduce collective
@@ -172,11 +172,11 @@ namespace torch::cuda::nccl {
 
         // run group-reduce kernel implemented by nccl group p2p
         int64_t input_offset = 0, output_offset = 0;
-        NCCLCHECK(ncclGroupStart());
+        CHECK_NCCL(ncclGroupStart());
         for (size_t input_split_idx = 0; input_split_idx < num_input_splits; ++input_split_idx) {
             auto dst_rank = dst_index_list[input_split_idx];
             auto input_size = input_split_size_list[input_split_idx] * stride0;
-            NCCLCHECK(ncclSend(
+            CHECK_NCCL(ncclSend(
                 (const void*) (send_buffer + input_offset * element_size),
                 input_size,
                 nccl_data_type,
@@ -189,7 +189,7 @@ namespace torch::cuda::nccl {
         for (size_t output_split_idx = 0; output_split_idx < num_output_splits; ++output_split_idx) {
             auto output_size = output_split_size_list[output_split_idx] * stride0;
             for (auto src_rank : src_indices_list[output_split_idx]) {
-                NCCLCHECK(ncclRecv(
+                CHECK_NCCL(ncclRecv(
                     (void *) (repeated_recv_buffer + output_offset * element_size),
                     output_size,
                     nccl_data_type,
@@ -208,7 +208,7 @@ namespace torch::cuda::nccl {
                 output_offset += output_size;
             }
         }
-        NCCLCHECK(ncclGroupEnd());
+        CHECK_NCCL(ncclGroupEnd());
 
         // run post-process reduce kernel
         run_group_reduce_post_process(args);

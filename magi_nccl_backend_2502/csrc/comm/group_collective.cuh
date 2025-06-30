@@ -25,7 +25,7 @@
 
 #define CHECK_CUDA_KERNEL_LAUNCH() CHECK_CUDA(cudaGetLastError())
 
-#define NCCLCHECK(cmd) do {                             \
+#define CHECK_NCCL(cmd) do {                             \
     ncclResult_t res = cmd;                             \
     if (res != ncclSuccess) {                           \
         printf(                                         \
