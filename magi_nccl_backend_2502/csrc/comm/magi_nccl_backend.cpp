@@ -5240,6 +5240,8 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::_allgather_base(
 }
 
 
+/****************************   MagiNCCLBackend new functions implementation   ****************************/
+
 // get the nccl cuda stream w.r.t. current device
 at::cuda::CUDAStream& MagiNCCLBackend::getNCCLStream() {
   auto deviceKey = getCurrentDeviceKey();
@@ -5251,6 +5253,249 @@ at::cuda::CUDAStream& MagiNCCLBackend::getNCCLStream() {
   }
   return ncclStreams_.at(deviceKey);
 }
+
+// group cast
+c10::intrusive_ptr<Work> MagiNCCLBackend::group_cast(
+  at::Tensor& inputTensor,
+  at::Tensor& outputTensor,
+  std::vector<int64_t>& inputSplitSizeList,
+  std::vector<int64_t>& outputSplitSizeList,
+  std::vector<std::vector<int64_t>>& dstIndicesList,
+  std::vector<int64_t>& srcIndexList
+  // const GroupCastOptions& /* unused */
+) {
+  check_gpu_single_tensor(outputTensor);
+  check_gpu_single_tensor(inputTensor);
+  TORCH_CHECK(
+    outputTensor.is_contiguous() && inputTensor.is_contiguous(),
+    "group_cast requires contiguous tensors for both input and output"
+  );
+
+  RECORD_PARAM_COMMS_DATA(
+    std::make_tuple(
+        static_cast<int64_t>(seqCollective_) + 1, // seq + 1 to match collective
+        false
+    ), 
+    std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+    inputTensor, // inputTensor
+    outputTensor, // outputTensor
+    rank_, // rank
+    "group_cast", // collective name
+    inputTensor.numel(), // inNelems
+    outputTensor.numel(), // outNelems
+    inputTensor.scalar_type(), // dType
+    inputSplitSizeList, // inSplitSizes
+    outputSplitSizeList, // outSplitSizes
+    /** TODO: extend RECORD_PARAM_COMMS_DATA and ParamCommsDebugInfo to support:
+     * dstIndicesList
+     * srcIndexList
+     */
+    globalRankStart, // globalRankStart
+    globalRankStride, // globalRankStride
+    this->getSize() // worldSize
+  );
+
+  // avoidRecordStreams_ note: collective() will stash inputTensors and outputTensors.
+  return collective(
+    inputTensor,
+    outputTensor,
+    [&](at::Tensor& input,
+        at::Tensor& output,
+        ncclComm_t comm,
+        at::cuda::CUDAStream& stream
+    ) {
+      // See [Sync Streams].
+      if (!avoidRecordStreams_) {
+        c10::cuda::CUDACachingAllocator::recordStream(
+          output.storage().data_ptr(), stream
+        );
+      }
+      torch::cuda::nccl::group_cast_nccl_kernel(
+          input.data_ptr(),
+          output.data_ptr(),
+          inputSplitSizeList,
+          outputSplitSizeList,
+          dstIndicesList,
+          srcIndexList,
+          input.stride(0),
+          input.element_size(),
+          input.scalar_type(),
+          comm,
+          stream
+      );
+      return ncclSuccess;
+    },
+    OpType::ALLTOALL_BASE, /** FIXME: create and use OpType::GROUP_CAST instead */
+    "magi_nccl:group_cast" // profile kernel name
+  );
+}
+
+
+// group reduce
+c10::intrusive_ptr<Work> MagiNCCLBackend::group_reduce(
+  at::Tensor& inputTensor,
+  at::Tensor& outputTensor,
+  std::vector<int64_t>& inputSplitSizeList,
+  std::vector<int64_t>& outputSplitSizeList,
+  std::vector<int64_t>& dstIndexList,
+  std::vector<std::vector<int64_t>>& srcIndicesList
+  // const GroupReduceOptions& /* unused */
+) {
+  check_gpu_single_tensor(outputTensor);
+  check_gpu_single_tensor(inputTensor);
+  TORCH_CHECK(
+    outputTensor.is_contiguous() && inputTensor.is_contiguous(),
+    "group_cast requires contiguous tensors for both input and output"
+  );
+
+  RECORD_PARAM_COMMS_DATA(
+    std::make_tuple(
+        static_cast<int64_t>(seqCollective_) + 1, // seq + 1 to match collective
+        false
+    ), 
+    std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+    inputTensor, // inputTensor
+    outputTensor, // outputTensor
+    rank_, // rank
+    "group_cast", // collective name
+    inputTensor.numel(), // inNelems
+    outputTensor.numel(), // outNelems
+    inputTensor.scalar_type(), // dType
+    inputSplitSizeList, // inSplitSizes
+    outputSplitSizeList, // outSplitSizes
+    /** TODO: extend RECORD_PARAM_COMMS_DATA and ParamCommsDebugInfo to support:
+     * dstIndexList
+     * srcIndicesList
+     */
+    globalRankStart, // globalRankStart
+    globalRankStride, // globalRankStride
+    this->getSize() // worldSize
+  );
+
+  // avoidRecordStreams_ note: collective() will stash inputTensors and outputTensors.
+  return collective(
+    inputTensor,
+    outputTensor,
+    [&](at::Tensor& input,
+        at::Tensor& output,
+        ncclComm_t comm,
+        at::cuda::CUDAStream& stream
+    ) {
+      // compute the group reduce meta info
+      auto meta_info = torch::cuda::nccl::compute_group_reduce_meta_info(
+          output.sizes(),
+          outputSplitSizeList,
+          srcIndicesList
+      );
+
+      // allocate the repeated output buffer as the temporary recv buffer
+      /** TODO: support passing repeated output buffer from outside through opts */
+      at::Tensor repeated_output = torch::empty(
+        meta_info.repeated_recv_buffer_shape,
+        /** NOTE: do not use `output.options()` here since it might set requires_grad(true) */
+        torch::dtype(output.scalar_type())
+        .device(output.device().type())
+        .layout(output.layout())
+      );
+
+      // allocate meta args for post-process kernel
+      /** TODO:
+       * 1. wrap the meta args into a single tensor to minimize the overhead of both H2D copy and record stream
+       * 2. support passing meta args from outside through opts
+       * 3. avoid cudaStreamSync of torch's tensor H2D creation using cuda event
+       */
+      at::Tensor d_split_size_list = torch::tensor(
+        outputSplitSizeList,
+        torch::dtype(torch::kInt64)
+        .device(output.device().type())
+      );
+      at::Tensor d_num_repeats_list = torch::tensor(
+        meta_info.num_repeats_list,
+        torch::dtype(torch::kInt64)
+        .device(output.device().type())
+      );
+      at::Tensor d_cu_split_size_list = torch::tensor(
+        meta_info.cu_split_size_list,
+        torch::dtype(torch::kInt64)
+        .device(output.device().type())
+      );
+      at::Tensor d_repeated_cu_split_size_list = torch::tensor(
+        meta_info.repeated_cu_split_size_list,
+        torch::dtype(torch::kInt64)
+        .device(output.device().type())
+      );
+
+      /** FIXME: we might need to record the repeated output and meta args for safety
+       * since they are allocated on the worker stream but only used in the nccl stream
+       * of which the caching allocator needs to be aware,
+       * however, it also causes the risk of higher cuda memory usage 
+       * due to delayed reuse of the storage for repeated output and meta args
+       */
+      c10::cuda::CUDACachingAllocator::recordStream(
+        repeated_output.storage().data_ptr(), stream
+      );
+      c10::cuda::CUDACachingAllocator::recordStream(
+        d_split_size_list.storage().data_ptr(), stream
+      );
+      c10::cuda::CUDACachingAllocator::recordStream(
+        d_num_repeats_list.storage().data_ptr(), stream
+      );
+      c10::cuda::CUDACachingAllocator::recordStream(
+        d_cu_split_size_list.storage().data_ptr(), stream
+      );
+      c10::cuda::CUDACachingAllocator::recordStream(
+        d_repeated_cu_split_size_list.storage().data_ptr(), stream
+      );
+
+      // See [Sync Streams].
+      if (!avoidRecordStreams_) {
+        c10::cuda::CUDACachingAllocator::recordStream(
+          output.storage().data_ptr(), stream
+        );
+      }
+
+      // make group-reduce post-process args
+      auto args = torch::cuda::nccl::GroupReducePostProcessArgs(
+          output.data_ptr(),
+          repeated_output.data_ptr(),
+
+          d_split_size_list.data_ptr<int64_t>(),
+          d_num_repeats_list.data_ptr<int64_t>(),
+          d_cu_split_size_list.data_ptr<int64_t>(),
+          d_repeated_cu_split_size_list.data_ptr<int64_t>(),
+
+          meta_info.seqlen,
+          meta_info.repeated_seqlen,
+          meta_info.num_splits,
+          meta_info.max_split_size,
+          input.stride(0),
+
+          input.scalar_type(),
+          stream.stream()
+      );
+
+      torch::cuda::nccl::group_reduce_nccl_kernel(
+          input.data_ptr(),
+          output.data_ptr(),
+          repeated_output.data_ptr(),
+          inputSplitSizeList,
+          outputSplitSizeList,
+          dstIndexList,
+          srcIndicesList,
+          input.stride(0),
+          input.element_size(),
+          input.scalar_type(),
+          comm,
+          stream,
+          args
+      );
+      return ncclSuccess;
+    },
+    OpType::ALLTOALL_BASE, /** FIXME: create and use OpType::GROUP_CAST instead */
+    "magi_nccl:group_reduce" // profile kernel name
+  );
+}
+
 
 // factory method to create an magi nccl process group
 c10::intrusive_ptr<Backend> MagiNCCLBackend::createMagiNCCLBackend(
@@ -5299,32 +5544,41 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             py::arg("size"),
             "Constructor to create MagiNCCLBackend instance"
         )
-        // .def(
-        //   "group_cast",
-        //   &MagiNCCLBackend::group_cast,
-        //   py::arg("input_tensor"),
-        //   py::arg("output_tensor"),
-        //   py::arg("input_split_size_list"),
-        //   py::arg("output_split_size_list"),
-        //   py::arg("dst_indices_list"),
-        //   py::arg("src_index_list"),
-        //   // py::arg("opts") = ::c10d::GroupCastOptions(),
-        //   py::call_guard<py::gil_scoped_release>(),
-        //   R"(An nccl-based group cast collective operation.)"
-        // )
-        // .def(
-        //   "group_reduce",
-        //   &MagiNCCLBackend::group_reduce,
-        //   py::arg("input_tensor"),
-        //   py::arg("output_tensor"),
-        //   py::arg("input_split_size_list"),
-        //   py::arg("output_split_size_list"),
-        //   py::arg("dst_index_list"),
-        //   py::arg("src_indices_list"),
-        //   // py::arg("opts") = ::c10d::GroupReduceOptions(),
-        //   py::call_guard<py::gil_scoped_release>(),
-        //   R"(An nccl-based group reduce collective operation.)"
-        // )
+        .def(
+          /** NOTE: we need explicitly define the pybind of `_shutdown`,
+           * since it is not defined by parent class `Backend`
+           */
+          "_shutdown",
+          [](const c10::intrusive_ptr<::c10d::MagiNCCLBackend>& self) {
+            return self->shutdown();
+          },
+          py::call_guard<py::gil_scoped_release>())
+        .def(
+          "group_cast",
+          &MagiNCCLBackend::group_cast,
+          py::arg("input_tensor"),
+          py::arg("output_tensor"),
+          py::arg("input_split_size_list"),
+          py::arg("output_split_size_list"),
+          py::arg("dst_indices_list"),
+          py::arg("src_index_list"),
+          // py::arg("opts") = ::c10d::GroupCastOptions(), // TODO: support opts
+          py::call_guard<py::gil_scoped_release>(),
+          R"(A nccl-based group cast collective operation.)"
+        )
+        .def(
+          "group_reduce",
+          &MagiNCCLBackend::group_reduce,
+          py::arg("input_tensor"),
+          py::arg("output_tensor"),
+          py::arg("input_split_size_list"),
+          py::arg("output_split_size_list"),
+          py::arg("dst_index_list"),
+          py::arg("src_indices_list"),
+          // py::arg("opts") = ::c10d::GroupReduceOptions(), // TODO: support opts
+          py::call_guard<py::gil_scoped_release>(),
+          R"(A nccl-based group reduce collective operation.)"
+        )
         .def_property_readonly(
           "nccl_stream",
           [](MagiNCCLBackend& self) -> py::object {

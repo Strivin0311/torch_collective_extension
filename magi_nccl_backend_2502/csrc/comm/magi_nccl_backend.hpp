@@ -598,12 +598,6 @@ class TORCH_API MagiNCCLBackend : public Backend {
 
   ~MagiNCCLBackend() override;
 
-  // get current device key as a string like "0"
-  inline std::string getCurrentDeviceKey() const { return std::to_string(at::cuda::current_device()); }
-
-  // get the nccl cuda stream w.r.t. current device
-  at::cuda::CUDAStream& getNCCLStream();
-
   // This function returns a local uid for MagiNCCLBackend.
   uint64_t getUid() {
     return static_cast<uint64_t>(local_id_);
@@ -807,8 +801,36 @@ class TORCH_API MagiNCCLBackend : public Backend {
       const std::chrono::milliseconds& timeout);
 
     
+    /****************************   MagiNCCLBackend new functions declaration   ****************************/
+
+    // get current device key as a string like "0"
+    inline std::string getCurrentDeviceKey() const { return std::to_string(at::cuda::current_device()); }
+
+    // get the nccl cuda stream w.r.t. current device
+    at::cuda::CUDAStream& getNCCLStream();
+
+    // group cast
+    c10::intrusive_ptr<Work> group_cast(
+        at::Tensor& outputTensor,
+        at::Tensor& inputTensor,
+        std::vector<int64_t>& inputSplitSizeList,
+        std::vector<int64_t>& outputSplitSizeList,
+        std::vector<std::vector<int64_t>>& dstIndicesList,
+        std::vector<int64_t>& srcIndexList);
+        // const GroupCastOptions& opts = GroupCastOptions());
+
+    // group reduce
+    c10::intrusive_ptr<Work> group_reduce(
+        at::Tensor& outputTensor,
+        at::Tensor& inputTensor,
+        std::vector<int64_t>& inputSplitSizeList,
+        std::vector<int64_t>& outputSplitSizeList,
+        std::vector<int64_t>& dstIndexList,
+        std::vector<std::vector<int64_t>>& srcIndicesList);
+        // const GroupCastOptions& opts = GroupReduceOptions());
+    
     // factory method to create an magi nccl process group
-  static c10::intrusive_ptr<Backend> createMagiNCCLBackend(
+    static c10::intrusive_ptr<Backend> createMagiNCCLBackend(
         const c10::intrusive_ptr<::c10d::Store>& store,
         int rank,
         int size,
@@ -822,7 +844,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
      *  2. `backend_class = creator_fn(dist_backend_opts, backend_options)`, otherwise
      * and the process group object will also register it using `pg._register_backend`
      */
-  static void MagiNCCLBackendConstructor() __attribute__((constructor)) {
+    static void MagiNCCLBackendConstructor() __attribute__((constructor)) {
         // import torch.distributed python module
         py::object module = py::module::import("torch.distributed");
         // access the register_backend method of the class Backend

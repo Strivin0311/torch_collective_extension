@@ -4,6 +4,7 @@ from itertools import chain
 
 import torch
 import torch.distributed as dist
+from torch.distributed import ProcessGroupNCCL
 
 import magi_nccl
 from magi_nccl import MagiNCCLBackend
@@ -53,6 +54,9 @@ assert isinstance(backend, MagiNCCLBackend), (
     f"expected MagiNCCLBackend, got {type(backend)=}"
 )
 backend: MagiNCCLBackend = cast(MagiNCCLBackend, backend)
+assert not isinstance(backend, ProcessGroupNCCL), (
+    f"We expect MagiNCCLBackend not as a subclass of ProcessGroupNCCL"
+)
 
 pg = dist.new_group(list(range(world_size)), backend="magi_nccl")
 print_rank(f"NewGroup: {type(pg)=}, {pg._get_backend_name()=}")

@@ -1,3 +1,5 @@
+import importlib
+
 import torch
 import torch.distributed as dist
 from torch.distributed.c10d_logger import _exception_logger
@@ -7,9 +9,30 @@ from torch.distributed.distributed_c10d import (
     _warn_not_in_group, 
     _get_default_group,
     _ensure_all_tensors_same_dtype,
+    is_nccl_available,
+    is_gloo_available,
+    ProcessGroupNCCL,
+    ProcessGroupGloo,
 )
 
 from magi_nccl import MagiNCCLBackend
+
+
+def _magi_nccl_shutdown_backend(pg) -> None:
+    """Try to shut down the backend of a process group.
+    Currently, only ProcessGroupNCCL, ProcessGroupGloo, and MagiNCCLBackend is supported.
+    No op for other backends.
+    """
+    backend = None
+    try:
+        backend = pg._get_backend(torch.device("cuda"))
+    except RuntimeError:
+        pass
+    if is_nccl_available() and isinstance(backend, (ProcessGroupNCCL, MagiNCCLBackend)):
+        # explictly call shutdown to ensure that NCCL resources are released
+        backend._shutdown()
+    elif is_gloo_available() and isinstance(backend, ProcessGroupGloo):
+        backend._shutdown()
 
 
 @_exception_logger
@@ -104,3 +127,9 @@ def group_reduce_collective(
         return work
     else:
         work.wait()
+        
+    
+# NOTE: since MagiNCCLBackend is actually NOT a subclass of ProcessGroupNCCL
+# we have to extend the `_shutdown_backend` function to support MagiNCCLBackend
+torch_distributed_c10d = importlib.import_module('torch.distributed.distributed_c10d')
+torch_distributed_c10d._shutdown_backend = _magi_nccl_shutdown_backend

@@ -14,6 +14,10 @@ class GroupReduceOptions:
     asyncOp: bool
 
 
+# NOTE: here we set MagiNCCLBackend as a subclass of ProcessGroupNCCL
+# to inherit the same common interfaces
+# however, it is NOT true in both python end and c++ end
+# i.e. isinstance(MagiNCCLBackend, ProcessGroupNCCL) is False
 class MagiNCCLBackend(dist.ProcessGroupNCCL):
     
     def __init__(
