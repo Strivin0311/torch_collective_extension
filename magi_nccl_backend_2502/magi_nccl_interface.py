@@ -129,7 +129,6 @@ def group_reduce_collective(
         work.wait()
         
     
-# NOTE: since MagiNCCLBackend is actually NOT a subclass of ProcessGroupNCCL
-# we have to extend the `_shutdown_backend` function to support MagiNCCLBackend
+# NOTE: we have to extend the `_shutdown_backend` function to let `destroy_process_group` works for MagiNCCLBackend
 torch_distributed_c10d = importlib.import_module('torch.distributed.distributed_c10d')
 torch_distributed_c10d._shutdown_backend = _magi_nccl_shutdown_backend
