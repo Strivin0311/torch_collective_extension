@@ -39,7 +39,7 @@ device = torch.cuda.current_device()
 dtype = torch.bfloat16
 
 # just print the function name to see if it is loaded
-print_rank(f"{magi_nccl.createMagiNCCLBackend=}")
+print_rank(f"{magi_nccl.__file__=} | {magi_nccl.createMagiNCCLBackend=}")
 
 
 # --- init pg and backend --- #
