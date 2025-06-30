@@ -1,7 +1,15 @@
+import os
 import math
 from itertools import chain
 
 import torch
+
+
+def print_rank(msg: str):
+    """Print the rank and message."""
+    rank = int(os.environ["LOCAL_RANK"])
+    print(f"\n[RANK {rank}] {msg}\n", flush=True)
+
 
 def _sanity_check_nccl_send_recv(
     num_send_list: list[int],

@@ -14,6 +14,7 @@ from magi_nccl_interface import (
     group_reduce_collective,
 )
 from utils import (
+    print_rank,
     sanity_check_for_group_cast_meta_args_per_rank,
     sanity_check_for_group_reduce_meta_args_per_rank,
     get_group_reduce_post_process_bytes,
@@ -37,14 +38,12 @@ torch.cuda.set_device(rank)
 device = torch.cuda.current_device()
 dtype = torch.bfloat16
 
-def print_rank(msg: str):
-    """Print the rank and message."""
-    rank = int(os.environ["LOCAL_RANK"])
-    print(f"\n[RANK {rank}] {msg}\n", flush=True)
-
 # just print the function name to see if it is loaded
 print_rank(f"{magi_nccl.createMagiNCCLBackend=}")
 
+# DE-BUG
+import sys
+sys.exit(0)
 
 # --- init pg and backend --- #
 

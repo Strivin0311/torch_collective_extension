@@ -368,7 +368,7 @@ inline void errorIfCapturingNonCapturableNCCL(c10::cuda::CaptureStatus status) {
 // - This map has also to be maintained as global variable since the register
 //   hooks are called outside the scope of any PG, thus we need traverse
 //   communicators in all PGs.
-static std::unordered_map<std::shared_ptr<NCCLComm>, int> ncclCommDevIdxMap;
+static std::unordered_map<std::shared_ptr<MagiNCCLComm>, int> ncclCommDevIdxMap;
 static std::mutex ncclCommDevIdxMapMutex;
 static bool allocatorHooksAttached = false;
 
@@ -423,7 +423,7 @@ static std::
   // dump_nccl_trace is only called from the default PG (local_id_=0), but we
   // want to dump from all comms so we need to iterate over ncclCommDevIdxMap,
   // which is static
-  std::vector<std::shared_ptr<NCCLComm>> allNCCLComms;
+  std::vector<std::shared_ptr<MagiNCCLComm>> allNCCLComms;
   // within the critical section, we don't want to dump while holding the lock
   // as dump might hang
   ncclCommDevIdxMapMutex.lock();
@@ -453,15 +453,15 @@ std::string dump_nccl_trace(
     printNcclCommProxyTrace("Received dump signal " + ncclUniqueIDStr, dump);
   }
 #endif
-  return FlightRecorder::get()->dump(
+  return MagiFlightRecorder::get()->dump(
       ncclDumpMap, includeCollectives, includeStackTraces, onlyActive);
 }
 
-std::string dump_nccl_trace_json(bool includeCollectives, bool onlyActive) {
-  auto ncclDumpMap = getNCCLCommDumpMap();
-  return FlightRecorder::get()->dump_json(
-      ncclDumpMap, includeCollectives, onlyActive);
-}
+// std::string dump_nccl_trace_json(bool includeCollectives, bool onlyActive) {
+//   auto ncclDumpMap = getNCCLCommDumpMap();
+//   return MagiFlightRecorder::get()->dump_json(
+//       ncclDumpMap, includeCollectives, onlyActive);
+// }
 
 std::optional<std::function<void(std::function<void(const std::string&)>)>>&
 get_cpp_trace_dumper() {
@@ -719,8 +719,8 @@ bool MagiNCCLBackend::WorkNCCL::checkTimeout(
 void MagiNCCLBackend::WorkNCCL::printTraceback() const {
   // First step we get the corresponding record entry from FR, based on work's
   // trace_id_
-  std::optional<FlightRecorder::Entry> entry =
-      FlightRecorder::get()->getEntry(trace_id_);
+  std::optional<MagiFlightRecorder::Entry> entry =
+      MagiFlightRecorder::get()->getEntry(trace_id_);
   if (entry.has_value()) {
     auto entryVal = entry.value();
     // Get stack trace from FR entry, in string format
@@ -738,7 +738,7 @@ void MagiNCCLBackend::WorkNCCL::printTraceback() const {
   } else {
     LOG(ERROR)
         << "Stack trace of the failed collective not found, "
-        << "potentially because FlightRecorder is disabled. "
+        << "potentially because MagiFlightRecorder is disabled. "
         << "You can enable it by setting TORCH_NCCL_TRACE_BUFFER_SIZE to a non-zero value.";
   }
 }
@@ -1186,7 +1186,7 @@ void MagiNCCLBackend::performNocolorSplit(at::Device device) {
     LOG(ERROR) << logPrefix()
                << "No parent communicator exists for nocolor split";
   }
-  NCCLComm::split(
+  MagiNCCLComm::split(
       comm.get(),
       NCCL_SPLIT_NOCOLOR,
       rank_,
@@ -1289,7 +1289,7 @@ void MagiNCCLBackend::registerOnCompletionHook(
     std::function<void(std::shared_ptr<WorkInfo>)>&& hook) {
   TORCH_WARN_ONCE(
       "MagiNCCLBackend OnCompletion hook will be deprecated in favor of Flight Recorder. "
-      "Please check out FlightRecorder.hpp for information that is recorded at work completion. "
+      "Please check out MagiFlightRecorder.hpp for information that is recorded at work completion. "
       "You can file an issue if you want additional information to be recorded. "
       "You can also file an RFC if you want Flight Recorder to accept plugins that customize the recording.")
 
@@ -1409,7 +1409,7 @@ bool MagiNCCLBackend::waitForFutureOrTimeout(
 }
 
 void MagiNCCLBackend::abortCommsFromMap(
-    std::unordered_map<std::string, std::shared_ptr<NCCLComm>>& ncclCommsMap,
+    std::unordered_map<std::string, std::shared_ptr<MagiNCCLComm>>& ncclCommsMap,
     const std::optional<std::string>& abortReason) {
   // The process may control multiple devices, loop through the communicators on
   // each device
@@ -2301,7 +2301,7 @@ void MagiNCCLBackend::watchdogHandler() {
         pgStatus_->lastCompletedWorkName = opTypeToString(work.opType_);
         pgStatus_->lastCompletedNumelIn = work.numelIn_;
         pgStatus_->lastCompletedNumelOut = work.numelOut_;
-        FlightRecorder::get()->retire_id(work.trace_id_, true);
+        MagiFlightRecorder::get()->retire_id(work.trace_id_, true);
         if (onCompletionHook_) {
           // Move Work object to completedWorkList_ to be consumed by the hook
           // thread
@@ -2404,12 +2404,12 @@ std::exception_ptr MagiNCCLBackend::WorkNCCL::checkForNCCLErrors() {
 }
 
 std::exception_ptr MagiNCCLBackend::checkForNCCLErrors(
-    std::shared_ptr<NCCLComm>& ncclComm) {
+    std::shared_ptr<MagiNCCLComm>& ncclComm) {
   return checkForNCCLErrorsInternal(ncclComm);
 }
 
 std::exception_ptr MagiNCCLBackend::checkForNCCLErrorsInternal(
-    std::shared_ptr<NCCLComm>& ncclComm) {
+    std::shared_ptr<MagiNCCLComm>& ncclComm) {
   // Prioritize commFailureReason over checkForNcclError() result if
   // commFailureReason is set.
   auto commFailureReason = ncclComm->getNcclCommFailureReason();
@@ -2515,7 +2515,7 @@ void MagiNCCLBackend::destroyNCCLComms(const std::string& devNCCLCommMapKey) {
         devNCCLCommMapKey,
         " in NCCL communicator map.");
   }
-  std::shared_ptr<NCCLComm>& ncclComm = devNCCLCommMap_[devNCCLCommMapKey];
+  std::shared_ptr<MagiNCCLComm>& ncclComm = devNCCLCommMap_[devNCCLCommMapKey];
   // ncclCommDestroy(comm->getNcclComm()) results in segfault when PG is being
   // destroyed, so using ncclCommAbort here.
   ncclComm->abort();
@@ -2529,7 +2529,7 @@ void MagiNCCLBackend::destroyNCCLComms(const std::string& devNCCLCommMapKey) {
   ncclCommDevIdxMapMutex.unlock();
 }
 
-std::shared_ptr<NCCLComm> MagiNCCLBackend::initNCCLComm(
+std::shared_ptr<MagiNCCLComm> MagiNCCLBackend::initNCCLComm(
     const std::string& deviceKey,
     at::Device& device,
     OpType opType,
@@ -2555,7 +2555,7 @@ std::shared_ptr<NCCLComm> MagiNCCLBackend::initNCCLComm(
   usedDeviceIdxs_.insert(device.index());
 
   // NCCL communicator not cached, create a new entry
-  std::shared_ptr<NCCLComm> ncclComm;
+  std::shared_ptr<MagiNCCLComm> ncclComm;
 
   // Create the unique NCCL ID and broadcast it
   ncclUniqueId ncclID;
@@ -2582,7 +2582,7 @@ std::shared_ptr<NCCLComm> MagiNCCLBackend::initNCCLComm(
   // example: Using the batch_isend_irecv to send a tensor to a target process.
   // On the sender side, the corresponding underlying NCCL calls will look like
   //   ncclGroupStart() // This is in batch_isend_irecv
-  //   ncclCommInitRank() // Inside NCCLComm::create
+  //   ncclCommInitRank() // Inside MagiNCCLComm::create
   //   ncclSend()
   //   ncclGroupEnd() // This is in batch_isend_irecv
   // With this pattern, the nccl communicator will be created in the last
@@ -2636,7 +2636,7 @@ std::shared_ptr<NCCLComm> MagiNCCLBackend::initNCCLComm(
       if (parentComm != nullptr && !parentComm->isAborted()) {
         LOG(INFO) << logPrefix() << "Splitting NCCL communicator from "
                   << parentComm->repr();
-        ncclComm = NCCLComm::split(
+        ncclComm = MagiNCCLComm::split(
             parentComm.get(),
             options_->split_color,
             rank,
@@ -2673,9 +2673,9 @@ std::shared_ptr<NCCLComm> MagiNCCLBackend::initNCCLComm(
 
 #ifdef NCCL_HAS_COMM_NONBLOCKING
     ncclComm =
-        NCCLComm::create(numRanks, rank, ncclID, deviceIndex, options_->config);
+        MagiNCCLComm::create(numRanks, rank, ncclID, deviceIndex, options_->config);
 #else
-    ncclComm = NCCLComm::create(numRanks, rank, ncclID, deviceIndex);
+    ncclComm = MagiNCCLComm::create(numRanks, rank, ncclID, deviceIndex);
 #endif
   }
 
@@ -2689,7 +2689,7 @@ std::shared_ptr<NCCLComm> MagiNCCLBackend::initNCCLComm(
     inInitializationCommMap_.emplace(deviceKey, ncclComm);
   }
 
-  FlightRecorder::get()->record_pg_ranks(
+  MagiFlightRecorder::get()->record_pg_ranks(
       std::make_tuple(pg_uid_, pg_desc_), groupRanks());
 
   RECORD_PARAM_COMMS(
@@ -2769,7 +2769,7 @@ std::shared_ptr<NCCLComm> MagiNCCLBackend::initNCCLComm(
   return it->second;
 }
 
-std::shared_ptr<NCCLComm> MagiNCCLBackend::getNCCLComm(
+std::shared_ptr<MagiNCCLComm> MagiNCCLBackend::getNCCLComm(
     const std::string& deviceKey) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (devNCCLCommMap_.find(deviceKey) != devNCCLCommMap_.end()) {
@@ -2900,7 +2900,7 @@ c10::intrusive_ptr<MagiNCCLBackend::WorkNCCL> MagiNCCLBackend::initWork(
     //   these objects to the Work becuase it has implications for keeping those
     //   tensors alive longer and adds overhead when copying Work objects
     //   between threads
-    r->trace_id_ = FlightRecorder::get()->record(
+    r->trace_id_ = MagiFlightRecorder::get()->record(
         local_id_,
         std::make_tuple(pg_uid_, pg_desc_),
         seqCollective_,
@@ -3117,7 +3117,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::collective(
   op_id_++;
 
   const auto key = getKeyFromDevice(device);
-  std::shared_ptr<NCCLComm> ncclComm = getNCCLComm(key);
+  std::shared_ptr<MagiNCCLComm> ncclComm = getNCCLComm(key);
   if (ncclComm == nullptr) {
     ncclComm = initNCCLComm(key, device, opType);
   }
@@ -3316,7 +3316,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::collectiveCoalesced(
   op_id_++;
 
   const auto key = getKeyFromDevice(device);
-  std::shared_ptr<NCCLComm> ncclComm = getNCCLComm(key);
+  std::shared_ptr<MagiNCCLComm> ncclComm = getNCCLComm(key);
   if (ncclComm == nullptr) {
     ncclComm = initNCCLComm(key, device, opType);
   }
@@ -3544,7 +3544,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::pointToPoint(
   // coalesced or individual
   op_id_++;
 
-  std::shared_ptr<NCCLComm> ncclComm = getNCCLComm(key);
+  std::shared_ptr<MagiNCCLComm> ncclComm = getNCCLComm(key);
   if (ncclComm == nullptr) {
     ncclComm = initNCCLComm(key, device, opType, p2pRank, isSendRecvSelf);
   }
@@ -3581,7 +3581,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::pointToPoint(
     // later in endCoalescing we record a 'coalesced' Work which has
     // timing/state updates via watchdog thread, but lacks op metadata such as
     // input/output sizes and profilingTitle per-op in the group.
-    auto trace_id = FlightRecorder::get()->record(
+    auto trace_id = MagiFlightRecorder::get()->record(
         local_id_,
         std::make_tuple(pg_uid_, pg_desc_),
         seqCollective_,
@@ -3598,7 +3598,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::pointToPoint(
     // TODO(whc) if we want to make the per-p2p-op flightrecorder entries get
     // their timings/states updated by proxy when the Work obj representing the
     // coalesce group gets its update, we could accumulate these trace_ids
-    // together and ask FlightRecorder to take the update from one Work and
+    // together and ask MagiFlightRecorder to take the update from one Work and
     // apply it to multiple entries
     (void)trace_id;
   } else {
@@ -3623,7 +3623,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::pointToPoint(
     // TODO(whc) because we don't pass output {tensor} to initWork, we tell
     // initWork to not record, and then we manually call record passing all the
     // information it wants.
-    work->trace_id_ = FlightRecorder::get()->record(
+    work->trace_id_ = MagiFlightRecorder::get()->record(
         local_id_,
         std::make_tuple(pg_uid_, pg_desc_),
         seqCollective_,
@@ -4953,7 +4953,7 @@ void MagiNCCLBackend::groupEnd() {
 }
 
 void MagiNCCLBackend::groupEndNonblocking(
-    const std::shared_ptr<NCCLComm>& comm) {
+    const std::shared_ptr<MagiNCCLComm>& comm) {
 #ifndef NCCL_HAS_COMM_NONBLOCKING
   C10D_NCCL_CHECK(ncclGroupEnd(), std::nullopt);
 #else

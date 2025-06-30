@@ -43,7 +43,8 @@
 #include <pybind11/chrono.h>
 
 #include "group_collective.cuh"
-
+#include "magi_nccl_comm.hpp"
+#include "magi_flight_recorder.hpp"
 
 namespace c10d {
 
@@ -372,7 +373,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
     std::shared_ptr<at::cuda::CUDAEvent> ncclEndEvent_;
 
     // The NCCL communicator used for this work item.
-    std::shared_ptr<NCCLComm> ncclComm_;
+    std::shared_ptr<MagiNCCLComm> ncclComm_;
 
     // whether this work is a barrier op
     bool isBarrierOp_{false};
@@ -709,7 +710,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
 
   void groupEnd();
 
-  void groupEndNonblocking(const std::shared_ptr<NCCLComm>& comm);
+  void groupEndNonblocking(const std::shared_ptr<MagiNCCLComm>& comm);
 
   c10::intrusive_ptr<Work> gather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
@@ -747,7 +748,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
 
   // Helper function for iteratively aborting communicators in the provided map
   void abortCommsFromMap(
-      std::unordered_map<std::string, std::shared_ptr<NCCLComm>>& ncclCommsMap,
+      std::unordered_map<std::string, std::shared_ptr<MagiNCCLComm>>& ncclCommsMap,
       const std::optional<std::string>& abortReason);
 
   c10::intrusive_ptr<intra_node_comm::IntraNodeComm> initIntraNodeComm();
@@ -831,9 +832,9 @@ class TORCH_API MagiNCCLBackend : public Backend {
       int p2pRank);
 
   // Helper that looks up the cached NCCL communicators only
-  std::shared_ptr<NCCLComm> getNCCLComm(const std::string& deviceKey);
+  std::shared_ptr<MagiNCCLComm> getNCCLComm(const std::string& deviceKey);
 
-  std::shared_ptr<NCCLComm> initNCCLComm(
+  std::shared_ptr<MagiNCCLComm> initNCCLComm(
       const std::string& deviceKey,
       at::Device& device,
       OpType opType,
@@ -842,7 +843,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
 
   // Wrapper method which can be overridden for tests.
   virtual std::exception_ptr checkForNCCLErrors(
-      std::shared_ptr<NCCLComm>& ncclComm);
+      std::shared_ptr<MagiNCCLComm>& ncclComm);
 
   // Ensure thaht if record is True, the work obj will be enqueued via
   // workEnqueue
@@ -950,7 +951,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
   // Checks for NCCL errors on each of the communicators and returns an
   // appropriate exception_ptr (nullptr if no errors).
   static std::exception_ptr checkForNCCLErrorsInternal(
-      std::shared_ptr<NCCLComm>& ncclComm);
+      std::shared_ptr<MagiNCCLComm>& ncclComm);
 
   // Function that runs as part of a separate thread and checks for errors on
   // NCCL communicators. We need a separate thread to check for NCCL errors
@@ -1094,10 +1095,10 @@ class TORCH_API MagiNCCLBackend : public Backend {
   // the scenario where there is only 1 GPU per process. When it comes to
   // multiple GPUs per process, this part may need to redesigned.
   // TODO: we probably need a separte map for P2P comms
-  std::unordered_map<std::string, std::shared_ptr<NCCLComm>> devNCCLCommMap_;
+  std::unordered_map<std::string, std::shared_ptr<MagiNCCLComm>> devNCCLCommMap_;
 
   // The NCCL communicators currently in process of being initialized.
-  std::unordered_map<std::string, std::shared_ptr<NCCLComm>>
+  std::unordered_map<std::string, std::shared_ptr<MagiNCCLComm>>
       inInitializationCommMap_;
 
   // Mutex to guard maps like devNCCLCommMap_.
@@ -1206,7 +1207,7 @@ class TORCH_API MagiNCCLBackend : public Backend {
   at::Device coalescedDevice_ = at::Device("cuda");
 
   // Stores communicators for all collectives run inside a coalescing block
-  std::shared_ptr<NCCLComm> coalescedComm_ = nullptr;
+  std::shared_ptr<MagiNCCLComm> coalescedComm_ = nullptr;
 
   // Whether or not wait() and synchronize() are blocking operations that wait
   // for the operation to complete.
