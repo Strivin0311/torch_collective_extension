@@ -66,12 +66,26 @@ assert isinstance(pg_backend, MagiNCCLBackend), (
 
 # --- try simple functionalities --- #
 
-x = torch.zeros(world_size) + rank
+ar_ans = world_size * (world_size - 1) // 2
+
+x = torch.zeros(world_size, dtype=dtype) + rank
+arx = x.clone()
+arx_exp = torch.full_like(x, ar_ans)
+
 y = x.to(device)
+ary = y.clone()
+ary_exp = torch.full_like(y, ar_ans)
+
 z = y.clone()
+bz = z.clone()
+bz_exp = torch.zeros_like(z)
 
 p = torch.arange(world_size, device=device, dtype=dtype) + rank * 2
 gp = torch.empty(world_size**2, device=device, dtype=dtype)
+gp_exp = torch.concat([
+    torch.arange(world_size, device=device, dtype=dtype) + r * 2
+    for r in range(world_size)
+], dim=0)
 
 q = torch.arange(world_size*2, device=device, dtype=dtype) + rank * 2
 aq = torch.empty(world_size*2, device=device, dtype=dtype)
@@ -104,23 +118,28 @@ input_split_sizes = (
 )
 
 # NOTE: we cannot fetch the nccl stream at this point
-# since both the nccl stream and nccl comm are lazily initialized
-# until the first collective call
-# print_rank(f"{backend.nccl_stream=}")
+# since both the nccl stream and nccl comm are 
+# lazily initialized until the first collective call
+try:
+    backend.nccl_stream
+except RuntimeError as e:
+    print_rank(f"{e=}")
 
 # this goes through gloo backend
-dist.all_reduce(x, group=world_group)
-ans = world_size * (world_size - 1) // 2
-print_rank(f"cpu all-reduce for gloo backend: expected value: {ans=}, and actual value: {x=}") # the result should be [ans] * size
+dist.all_reduce(arx, group=world_group)
+print_rank(f"cpu all-reduce for gloo backend from {x=} to {arx=}")
+assert torch.allclose(arx, arx_exp)
 
 # this goes through nccl backend
 # and is expected to the same as nccl all-reduce
-dist.all_reduce(y, group=world_group)  # the result should be [ans] * size
-print_rank(f"cuda all-reduce for magi_nccl: expected value: {ans=}, and actual value: {y=}")
+dist.all_reduce(ary, group=world_group)  # the result should be [ans] * size
+print_rank(f"cuda all-reduce for magi_nccl from {y=} to {ary=}")
+assert torch.allclose(ary, ary_exp)
 
 # this is expected to the same as nccl broadcast
-dist.broadcast(z, 0, group=pg) # the result should be [0] * size
-print_rank(f"cuda broadcast for magi_nccl: expected value: 0, and actual value: {z=}")
+dist.broadcast(bz, 0, group=pg) # the result should be [0] * size
+print_rank(f"cuda broadcast for magi_nccl from {z=} to {bz=}")
+assert torch.allclose(bz, bz_exp)
 
 # this is expected to the same as nccl all-gather
 work = dist.all_gather_into_tensor(
@@ -131,7 +150,7 @@ work = dist.all_gather_into_tensor(
 )
 work.wait()
 print_rank(f"cuda all-gather for magi_nccl {p=} into {gp=}")
-
+assert torch.allclose(gp, gp_exp)
 
 # this is expected to the same as nccl all-to-all for list of tensors
 input = torch.arange(4, device=device, dtype=dtype) + rank * 4
@@ -168,6 +187,12 @@ work = dist.all_to_all_single(
 )
 work.wait()
 print_rank(f"cuda all-to-all-single-v for magi_nccl {q=} into {avq=}")
+
+
+# --- try nccl stream --- #
+
+nccl_stream = backend.nccl_stream
+print_rank(f"{rank}] {nccl_stream=} | {nccl_stream.stream_id=} | {nccl_stream.device_index=} | {nccl_stream.device_type=}")
 
 
 # --- try group cast --- #
@@ -352,9 +377,6 @@ torch.cuda.synchronize()
 
 side_stream = torch.cuda.Stream()
 print_rank(f"{side_stream=} | {side_stream.stream_id=} | {side_stream.device_index=} | {side_stream.device_type=}")
-
-nccl_stream = backend.nccl_stream
-print_rank(f"{rank}] {nccl_stream=} | {nccl_stream.stream_id=} | {nccl_stream.device_index=} | {nccl_stream.device_type=}")
 
 # init data shape
 # use large size for profiling to avoid cpu bound

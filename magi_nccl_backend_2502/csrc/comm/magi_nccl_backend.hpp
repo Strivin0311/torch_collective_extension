@@ -269,6 +269,13 @@ struct DumpPipe {
 //   work->wait()
 //
 //   // Now continue on other work in the current stream.
+
+
+/** NOTE: in python end, MagiNCCLBackend is inherited from torch.distributed.ProcessGroupNCCL
+ * however, in c++ end, MagiNCCLBackend is directly inherited from c10d::Backend,
+ * and most of the functions are implemented by copying from c10d::ProcessGroupNCCL, to simulate the inheritance
+ * since too many of the APIs are local symbols and inaccessible due to torch's compilation setting: `-fvisibility=hidden`
+ */
 class TORCH_API MagiNCCLBackend : public Backend {
  public:
   class WorkNCCL : public Work, public std::enable_shared_from_this<WorkNCCL> {
@@ -590,6 +597,12 @@ class TORCH_API MagiNCCLBackend : public Backend {
       : MagiNCCLBackend(store, rank, size, std::move(options)) {}
 
   ~MagiNCCLBackend() override;
+
+  // get current device key as a string like "0"
+  inline std::string getCurrentDeviceKey() const { return std::to_string(at::cuda::current_device()); }
+
+  // get the nccl cuda stream w.r.t. current device
+  at::cuda::CUDAStream& getNCCLStream();
 
   // This function returns a local uid for MagiNCCLBackend.
   uint64_t getUid() {

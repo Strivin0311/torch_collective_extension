@@ -5240,6 +5240,18 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::_allgather_base(
 }
 
 
+// get the nccl cuda stream w.r.t. current device
+at::cuda::CUDAStream& MagiNCCLBackend::getNCCLStream() {
+  auto deviceKey = getCurrentDeviceKey();
+  if (ncclStreams_.find(deviceKey) == ncclStreams_.end()) {
+    TORCH_CHECK(false,
+      "The NCCL stream for current device ", deviceKey, " is not found, ",
+      "which is probably due to lazy-initialization when no collective has been called."
+    );
+  }
+  return ncclStreams_.at(deviceKey);
+}
+
 // factory method to create an magi nccl process group
 c10::intrusive_ptr<Backend> MagiNCCLBackend::createMagiNCCLBackend(
     const c10::intrusive_ptr<::c10d::Store>& store,
@@ -5258,9 +5270,8 @@ c10::intrusive_ptr<Backend> MagiNCCLBackend::createMagiNCCLBackend(
  * import magi_nccl; print(magi_nccl.createMagiNCCLBackend)
  */
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    /** NOTE:
-     * this factory method is used in magi_nccl.hpp:static void MagiNCCLBackendConstructor()
-     * to automatically create and register this backend to torch.distributed.Backend
+    /** NOTE: this factory method is used in `magi_nccl_backend.hpp:static void MagiNCCLBackendConstructor()`
+     * to automatically create and register this backend to `torch.distributed.Backend`
      * thus it needs to be be individually registered in advance here
      */
     m.def("createMagiNCCLBackend", &MagiNCCLBackend::createMagiNCCLBackend);
@@ -5299,7 +5310,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         //   py::arg("src_index_list"),
         //   // py::arg("opts") = ::c10d::GroupCastOptions(),
         //   py::call_guard<py::gil_scoped_release>(),
-        //   R"(An nccl-based group cast collective operation that used the self-modified extended collective interface.)"
+        //   R"(An nccl-based group cast collective operation.)"
         // )
         // .def(
         //   "group_reduce",
@@ -5312,47 +5323,47 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         //   py::arg("src_indices_list"),
         //   // py::arg("opts") = ::c10d::GroupReduceOptions(),
         //   py::call_guard<py::gil_scoped_release>(),
-        //   R"(An nccl-based group reduce collective operation that used the self-modified extended collective interface.)"
+        //   R"(An nccl-based group reduce collective operation.)"
         // )
-        // .def_property_readonly(
-        //   "nccl_stream",
-        //   [](MagiNCCLBackend& self) -> py::object {
-        //     /** NOTE: here we do some hacky thing to get the nccl cuda stream in python-end
-        //      * 
-        //      * We first list the limitations as follows:
-        //      *    1. at::cuda::CUDAStream` is not registered by pytorch in python-end,
-        //      *      and we need to unwrap it to c10::Stream
-        //      *    2. it is not c10::Stream, but THPStream, that is directly linked to torch.cuda.Stream,
-        //      *      thus we need to convert a c10::Stream to THPStream
-        //      *    3. although pytorch gives a `THPStream_Wrap` function in `torch/csrc/Stream.h`
-        //      *      as well as a pybind type_cast function in `torch/csrc/utils/pybind.h`,
-        //      *      THPStream_Wrap is a local symbol in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so
-        //      *      thus we cannot directly access it
-        //      * 
-        //      * As a result, we give up the following code:
-        //      *    c10::Stream c10_stream = self.getNCCLStream().unwrap();
-        //      *    return py::reinterpret_steal<py::object>(THPStream_Wrap(c10_stream));
-        //      * 
-        //      * Therefore, we directly access the torch.cuda.Stream module 
-        //      * and initialize a pybind object with the internal cuda stream ptr as kwargs
-        //      */
+        .def_property_readonly(
+          "nccl_stream",
+          [](MagiNCCLBackend& self) -> py::object {
+            /** NOTE: here we do some hacky thing to get the nccl cuda stream in python end
+             * 
+             * We first list the limitations as follows:
+             *    1. at::cuda::CUDAStream` is not registered by pytorch in python end,
+             *      and we need to unwrap it to c10::Stream
+             *    2. it is not c10::Stream, but THPStream, that is directly linked to torch.cuda.Stream,
+             *      thus we need to convert a c10::Stream to THPStream
+             *    3. although pytorch gives a `THPStream_Wrap` function in `torch/csrc/Stream.h`
+             *      as well as a pybind type_cast function in `torch/csrc/utils/pybind.h`,
+             *      THPStream_Wrap is a local symbol in /usr/local/lib/python3.12/dist-packages/torch/lib/libtorch_python.so
+             *      thus we cannot directly access it
+             * 
+             * As a result, we give up the following code:
+             *    c10::Stream c10_stream = self.getNCCLStream().unwrap();
+             *    return py::reinterpret_steal<py::object>(THPStream_Wrap(c10_stream));
+             * 
+             * Therefore, we directly access the torch.cuda.Stream module 
+             * and initialize a pybind object with the internal cuda stream ptr as kwargs
+             */
   
-        //     thread_local py::object cached_nccl_stream = py::none();
-        //     if (!cached_nccl_stream.is_none()) { // already cached
-        //         return cached_nccl_stream;
-        //     }
+            thread_local py::object cached_nccl_stream = py::none();
+            if (!cached_nccl_stream.is_none()) { // already cached
+                return cached_nccl_stream;
+            }
   
-        //     /* everything is ok, only the stream id is not identical, but seems no problem  */
-        //     at::cuda::CUDAStream cuda_stream = self.getNCCLStream();
-        //     auto torch = py::module::import("torch");
-        //     auto torch_cuda_stream_class = torch.attr("cuda").attr("Stream");
-        //     py::kwargs kwargs;
-        //     kwargs["stream_ptr"] = py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()));
-        //     cached_nccl_stream = torch_cuda_stream_class(**kwargs);
-        //     return cached_nccl_stream;
-        //   },
-        //   R"(Return the NCCL cuda stream w.r.t the current device)"
-        // )
+            /* everything is ok, only the stream id is not identical, but seems no problem  */
+            at::cuda::CUDAStream cuda_stream = self.getNCCLStream();
+            auto torch = py::module::import("torch");
+            auto torch_cuda_stream_class = torch.attr("cuda").attr("Stream");
+            py::kwargs kwargs;
+            kwargs["stream_ptr"] = py::cast(reinterpret_cast<uintptr_t>(cuda_stream.stream()));
+            cached_nccl_stream = torch_cuda_stream_class(**kwargs);
+            return cached_nccl_stream;
+          },
+          R"(Return the NCCL cuda stream w.r.t current device)"
+        )
         ;
 }
 

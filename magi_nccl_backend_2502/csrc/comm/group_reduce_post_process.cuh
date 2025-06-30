@@ -6,7 +6,8 @@
 #define GROUP_REDUCE_POST_PROCESS_NUM_SMS 32 /* use the maximum number of SMs of nccl comm kernel */
 #define GROUP_REDUCE_POST_PROCESS_BLOCK_SIZE 1024 /* use the maximum block size for any SM */
 
-#define GROUP_REDUCE_POST_PROCESS_WITH_CUTE
+/** TODO: finish the cute kernel to handle the oob and become persistent */
+// #define GROUP_REDUCE_POST_PROCESS_WITH_CUTE
 
 namespace torch::cuda::nccl {
 
