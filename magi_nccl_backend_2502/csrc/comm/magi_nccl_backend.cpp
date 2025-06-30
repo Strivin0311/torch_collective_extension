@@ -1,4 +1,8 @@
-#ifdef USE_C10D_NCCL
+
+#ifndef USE_C10D_NCCL
+#define USE_C10D_NCCL
+#endif
+
 
 #include <exception>
 #include <map>
@@ -32,8 +36,6 @@
 #include <optional>
 
 #include "magi_nccl_backend.hpp"
-
-
 
 
 /** NOTE: copied from torch/csrc/distributed/c10d/init.cpp
@@ -5238,7 +5240,6 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::_allgather_base(
 }
 
 
-
 // factory method to create an magi nccl process group
 c10::intrusive_ptr<Backend> MagiNCCLBackend::createMagiNCCLBackend(
     const c10::intrusive_ptr<::c10d::Store>& store,
@@ -5249,16 +5250,16 @@ c10::intrusive_ptr<Backend> MagiNCCLBackend::createMagiNCCLBackend(
     return c10::make_intrusive<MagiNCCLBackend>(store, rank, size);
 }
   
-  
+
 /** NOTE: `TORCH_EXTENSION_NAME` is an env var
  * that will be automatically translated to the extention module name defined in setup.py
- * e.g. since this module is named `ext_nccl_backend`
+ * e.g. since this module is named `magi_nccl`
  * thus in the python script, we can use this function (though no use for now) as follows:
- * import ext_nccl_backend; print(ext_nccl_backend.createMagiNCCLBackend)
+ * import magi_nccl; print(magi_nccl.createMagiNCCLBackend)
  */
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     /** NOTE:
-     * this factory method is used in ext_nccl_backend.hpp:static void MagiNCCLBackendConstructor()
+     * this factory method is used in magi_nccl.hpp:static void MagiNCCLBackendConstructor()
      * to automatically create and register this backend to torch.distributed.Backend
      * thus it needs to be be individually registered in advance here
      */
@@ -5356,5 +5357,3 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 }
 
 } // namespace c10d
-
-#endif // USE_C10D_NCCL

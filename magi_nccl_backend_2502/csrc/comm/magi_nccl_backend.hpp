@@ -1,6 +1,8 @@
 #pragma once
 
-#ifdef USE_C10D_NCCL
+#ifndef USE_C10D_NCCL
+#define USE_C10D_NCCL
+#endif
 
 #if defined(__linux__)
 #include <fcntl.h>
@@ -39,6 +41,8 @@
 
 #include <torch/python.h>
 #include <pybind11/chrono.h>
+
+#include "group_collective.cuh"
 
 
 namespace c10d {
@@ -1313,5 +1317,3 @@ typedef bool (*gil_checker_t)();
 
 TORCH_API gil_checker_t& get_gil_checker();
 } // namespace c10d
-
-#endif // USE_C10D_NCCL

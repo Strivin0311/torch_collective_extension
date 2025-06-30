@@ -2,21 +2,17 @@
 # pip install -e . --no-build-isolation -v
 
 import os
+import glob
 import torch
 from setuptools import setup
 from torch.utils import cpp_extension
 
-csrc_root = "csrc/comm/"
+csrc_root = "csrc/comm"
 
 # self include and source
-sources = [
-    # "src/magi_nccl.cpp",
-    # "src/ext_nccl_comm.cpp",
-    # "src/ext_flight_recorder.cpp",
-    # "src/group_collective.cu",
-    f"{csrc_root}/*.cpp",
-    f"{csrc_root}/*.cu",
-]
+sources = []
+sources.extend(glob.glob(f"{csrc_root}/*.cpp"))
+sources.extend(glob.glob(f"{csrc_root}/*.cu"))
 
 include_dirs = [
     f"{os.path.dirname(os.path.abspath(__file__))}/{csrc_root}/",
