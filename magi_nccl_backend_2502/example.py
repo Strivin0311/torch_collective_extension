@@ -8,8 +8,6 @@ import torch.distributed as dist
 import magi_nccl
 from magi_nccl import MagiNCCLBackend
 from magi_nccl_interface import (
-    dummy_all_gather_into_tensor,
-    extended_all_to_all_single,
     group_cast_collective,
     group_reduce_collective,
 )
@@ -20,6 +18,7 @@ from utils import (
     get_group_reduce_post_process_bytes,
 )
 import nvtx
+
 
 # get some env variable as flags
 profile_mode = os.environ.get("EXAMPLE_PROFILE_MODE", "0") == "1"
@@ -41,9 +40,6 @@ dtype = torch.bfloat16
 # just print the function name to see if it is loaded
 print_rank(f"{magi_nccl.createMagiNCCLBackend=}")
 
-# DE-BUG
-import sys
-sys.exit(0)
 
 # --- init pg and backend --- #
 
@@ -68,25 +64,33 @@ assert isinstance(pg_backend, MagiNCCLBackend), (
 )
 
 
-
 # --- try simple functionalities --- #
 
 x = torch.zeros(world_size) + rank
 y = x.to(device)
 z = y.clone()
-p = torch.arange(world_size, device=device, dtype=torch.float32) + rank * 2
-gp = torch.empty(world_size**2, device=device, dtype=torch.float32)
 
-q = torch.arange(world_size*2, device=device, dtype=torch.float32) + rank * 2
-aq = torch.empty(world_size*2, device=device, dtype=torch.float32)
+p = torch.arange(world_size, device=device, dtype=dtype) + rank * 2
+gp = torch.empty(world_size**2, device=device, dtype=dtype)
+
+q = torch.arange(world_size*2, device=device, dtype=dtype) + rank * 2
+aq = torch.empty(world_size*2, device=device, dtype=dtype)
+aq_exp = q.clone()
+
 avq = torch.empty(
     (3 * (world_size // 2)) 
     if rank < world_size - 1 
     else ((world_size + 3) * (world_size // 2)),
     device=device, 
-    dtype=torch.float32
+    dtype=dtype
 )
-avq_ext = torch.empty_like(avq)
+avq_exp = [
+    torch.tensor([0., 1., 2., 4., 5., 6.], device=device, dtype=dtype),
+    torch.tensor([2., 3., 3., 6., 7., 7.], device=device, dtype=dtype),
+    torch.tensor([4., 5., 4., 8., 9., 8.], device=device, dtype=dtype),
+    torch.tensor([6.,  7.,  5.,  6.,  7.,  8.,  9., 10., 11.,  9., 10., 11., 12., 13.], device=device, dtype=dtype),
+    
+][rank]
 
 output_split_sizes = (
     list(chain(*([[2,1]] * (world_size//2)))) 
@@ -130,12 +134,14 @@ print_rank(f"cuda all-gather for magi_nccl {p=} into {gp=}")
 
 
 # this is expected to the same as nccl all-to-all for list of tensors
-input = torch.arange(4, device=device, dtype=torch.float32) + rank * 4
+input = torch.arange(4, device=device, dtype=dtype) + rank * 4
 input = list(input.chunk(4))
-output = list(torch.empty([4], device=device, dtype=torch.float32).chunk(4))
+output = list(torch.empty([4], device=device, dtype=dtype).chunk(4))
+exp_output = list(torch.arange(4, device=device, dtype=dtype) * world_size + rank)
 work = dist.all_to_all(output, input, group=world_group, async_op=True)
 work.wait()
-print_rank(f"cuda all-to-all for magi_nccl {input=} into {output=}")
+print_rank(f"cuda all-to-all-list for magi_nccl {input=} into {output=}")
+assert all(torch.allclose(o, e) for o, e in zip(output, exp_output))
 
 
 # this is expected to the same as nccl all-to-all
@@ -148,7 +154,8 @@ work = dist.all_to_all_single(
     async_op=True,
 )
 work.wait()
-print_rank(f"cuda all-to-all for magi_nccl {q=} into {aq=}")
+print_rank(f"cuda all-to-all-single for magi_nccl {q=} into {aq=}")
+assert torch.allclose(aq, aq_exp)
 
 # this is expected to the same as nccl all-to-all-v
 work = dist.all_to_all_single(
@@ -160,32 +167,7 @@ work = dist.all_to_all_single(
     async_op=True,
 )
 work.wait()
-print_rank(f"cuda all-to-all-v for magi_nccl {q=} into {avq=}")
-
-# this is expected to a dummy all-gather
-# that sets output to all zeros and print a message
-work = dummy_all_gather_into_tensor(
-    output_tensor=gp,
-    input_tensor=p,
-    group=world_group,
-    async_op=True,
-)
-work.wait()
-print_rank(f"cuda dummy all-gather for magi_nccl {p=} into {gp=}")
-
-
-# this is expected to the same as nccl all-to-all-v
-# except using ext_collective with some customized messages
-work = extended_all_to_all_single(
-    output=avq_ext,
-    input=q,
-    output_split_sizes=output_split_sizes,
-    input_split_sizes=input_split_sizes,
-    group=world_group,
-    async_op=True,
-)
-work.wait()
-print_rank(f"cuda extended all-to-all-v for magi_nccl {q=} into {avq_ext=}")
+print_rank(f"cuda all-to-all-single-v for magi_nccl {q=} into {avq=}")
 
 
 # --- try group cast --- #
@@ -380,8 +362,8 @@ m, n, k = 16384, 16384, 8192
 
 a = torch.randn(m, k, device=device)
 b = torch.randn(k, n, device=device)
-s = torch.randn((m,n), device=device, dtype=torch.float32)
-g = torch.empty((m*world_size, n), device=device, dtype=torch.float32)
+s = torch.randn((m,n), device=device, dtype=dtype)
+g = torch.empty((m*world_size, n), device=device, dtype=dtype)
 
 if profile_mode:
     prof_iters, prof_start_iter, prof_end_iter = 10, 5, 8
