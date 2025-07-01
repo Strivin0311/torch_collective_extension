@@ -38,9 +38,13 @@ module = cpp_extension.CUDAExtension(
     # libraries=libraries,
     # extra_link_args=extra_link_args,
     extra_compile_args={
-        # 'cxx': ['-std=c++17', '-fPIC'],
-        # 'nvcc': ['-std=c++17', '-Xcompiler', '-fPIC']
-        'nvcc': ['-lineinfo']
+        'nvcc': [
+            '-O3',
+            '-lineinfo', 
+            "-Xptxas", 
+            "-v", 
+            "-gencode", "arch=compute_90,code=sm_90",
+        ]
     }
 )
     
