@@ -36,7 +36,7 @@ def _magi_nccl_shutdown_backend(pg) -> None:
 
 
 @_exception_logger
-def group_cast_collective(
+def group_cast(
     input: torch.Tensor,
     output: torch.Tensor,
     input_split_size_list: list[int],
@@ -46,7 +46,7 @@ def group_cast_collective(
     group: dist.Backend = None,
     async_op: bool = False,
 ): # -> dist.Work | None
-    """TODO: add docstring"""
+    """Group cast communication based on MagiNCCLBackend"""
     if _rank_not_in_group(group):
         _warn_not_in_group("group_cast")
         return
@@ -83,7 +83,7 @@ def group_cast_collective(
         
         
 @_exception_logger
-def group_reduce_collective(
+def group_reduce(
     input: torch.Tensor,
     output: torch.Tensor,
     input_split_size_list: list[int],
@@ -93,9 +93,9 @@ def group_reduce_collective(
     group: dist.Backend = None,
     async_op: bool = False,
 ): # -> dist.Work | None
-    """TODO: add docstring"""
+    """Group reduce communication based on MagiNCCLBackend"""
     if _rank_not_in_group(group):
-        _warn_not_in_group("group_cast")
+        _warn_not_in_group("group_reduce")
         return
 
     _check_single_tensor(output, "output")

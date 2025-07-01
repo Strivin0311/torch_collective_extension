@@ -9,8 +9,8 @@ from torch.distributed import ProcessGroupNCCL
 import magi_nccl
 from magi_nccl import MagiNCCLBackend
 from magi_nccl_interface import (
-    group_cast_collective,
-    group_reduce_collective,
+    group_cast,
+    group_reduce,
 )
 from utils import (
     print_rank,
@@ -268,7 +268,7 @@ sanity_check_for_group_cast_meta_args_per_rank(
 )
 
 # run group cast
-work = group_cast_collective(
+work = group_cast(
     input=gc_inp,
     output=gc_out,
     input_split_size_list=gc_input_split_size_list,
@@ -359,7 +359,7 @@ gr_post_process_bytes = get_group_reduce_post_process_bytes(
     dtype=dtype,
 )
 
-work = group_reduce_collective(
+work = group_reduce(
     input=gr_inp,
     output=gr_out,
     input_split_size_list=gr_input_split_size_list,
@@ -424,7 +424,7 @@ for iter in range(prof_iters):
                 d = a @ b
 
     with nvtx.add_nvtx_event(f"rank{rank} nccl stream group-cast"):
-        gc_work = group_cast_collective(
+        gc_work = group_cast(
             input=gc_inp,
             output=gc_out,
             input_split_size_list=gc_input_split_size_list,
@@ -436,7 +436,7 @@ for iter in range(prof_iters):
         )
     
     with nvtx.add_nvtx_event(f"rank{rank} nccl stream group-reduce"):
-        gr_work = group_reduce_collective(
+        gr_work = group_reduce(
             input=gr_inp,
             output=gr_out,
             input_split_size_list=gr_input_split_size_list,
