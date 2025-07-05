@@ -5326,7 +5326,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::group_cast(
       return ncclSuccess;
     },
     OpType::ALLTOALL_BASE, /** FIXME: create and use OpType::GROUP_CAST instead */
-    "magi_nccl:group_cast" // profile kernel name
+    "magi_nccl_eg:group_cast" // profile kernel name
   );
 }
 
@@ -5492,7 +5492,7 @@ c10::intrusive_ptr<Work> MagiNCCLBackend::group_reduce(
       return ncclSuccess;
     },
     OpType::ALLTOALL_BASE, /** FIXME: create and use OpType::GROUP_CAST instead */
-    "magi_nccl:group_reduce" // profile kernel name
+    "magi_nccl_eg:group_reduce" // profile kernel name
   );
 }
 
